@@ -1,0 +1,16 @@
+[package]
+name = "sphincs-ref"
+version = "0.1.0"
+description = "Native SPHINCS+ reference verify (PQClean) for test vectors and witness generation"
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["pqclean"]
+pqclean = []
+
+[dependencies]
+circuit-spec = { path = "../circuit-spec" }
+
+[build-dependencies]
+cc = "1.2"

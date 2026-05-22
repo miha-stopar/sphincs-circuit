@@ -1,0 +1,8 @@
+[package]
+name = "circuit-spec"
+version = "0.1.0"
+description = "Prepare/Show relations for SPHINCS+ credential ZK proofs"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

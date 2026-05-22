@@ -1,0 +1,5 @@
+/target/
+# Keep PQClean vendored for reproducible builds (clone via scripts/vendor-pqclean.sh)
+# /third_party/
+*.swp
+.DS_Store

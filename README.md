@@ -35,20 +35,21 @@ Prove in zero knowledge that you know a valid **SPHINCS+** signature for a messa
 docs/           PLAN, SPHINCS, FOLDING
 crates/
   circuit-spec/ Verify relation types
-  sphincs-ref/  Native PQClean verify wrapper (M0)
+  sphincs-ref/  Native verify + SHA compression trace (M0)
 circuits/       R1CS gadgets (planned)
 third_party/    PQClean (vendored locally)
 ```
 
 ## Status
 
-**M0 (in progress):** PQClean `crypto_sign_verify` linked in `sphincs-ref`.
+**M0:** PQClean verify linked; every SHA-256 compression during verify is recorded (`verify_with_trace`).
 
 ```bash
 cargo test -p sphincs-ref
+cargo run -p sphincs-ref --bin sphincs-trace-stats
 ```
 
-**Next:** SHA-256 compression trace on verify, then bellpepper `sha256_compress` (M1).
+**Next (M1):** bellpepper `sha256_compress` step circuit checked against trace witnesses.
 
 ## Reference
 

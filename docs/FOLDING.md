@@ -245,6 +245,8 @@ Exact counts should be confirmed with instrumentation (`scripts/count-sha-compre
 | WOTS (7 layers) | 63 + 7 + 35×avg_steps | **~1,500–2,500** (avg steps ≈ 7) |
 | **Total** | | **~2,000–3,000+** |
 
+**Measured (M0, `cargo run -p sphincs-ref --bin sphincs-trace-stats`):** ~2236 compressions for a 33-byte message verify; count varies with message-dependent WOTS paths.
+
 Proving cost scales with compression count, not mainly with 8 KB signature size.
 
 ---

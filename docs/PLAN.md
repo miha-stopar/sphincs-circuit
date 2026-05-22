@@ -135,8 +135,8 @@ No trusted setup. Groth16 not used.
 
 - [x] Vendor PQClean `sphincs-sha2-128s-simple`
 - [x] `sphincs-ref`: wrap `crypto_sign_verify`
-- [ ] Instrument SHA-256: emit compression trace on verify (`SPX_SHA256_TRACE` in `sha2.c`)
-- [ ] `verify_with_trace`, `sign_deterministic`, tests + `sphincs-trace-stats` binary
+- [x] Instrument SHA-256: emit compression trace on verify (`SPX_SHA256_TRACE` in `sha2.c`)
+- [x] `verify_with_trace`, `sign_deterministic`, tests + `sphincs-trace-stats` binary
 - [ ] Export trace JSON for circuit witness generator (M1)
 
 ### M1 — Step circuit (2–3 weeks)

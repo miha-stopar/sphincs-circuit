@@ -1,4 +1,4 @@
-//! Builds PQClean `sphincs-sha2-128s-simple` (clean) + `common/sha2.c`.
+//! Builds PQClean `sphincs-sha2-128s-simple` (clean) + instrumented `common/sha2.c`.
 
 use std::env;
 use std::path::PathBuf;
@@ -10,6 +10,7 @@ fn main() {
     let pqclean = repo_root.join("third_party/PQClean");
     let scheme_clean = pqclean.join("crypto_sign/sphincs-sha2-128s-simple/clean");
     let common = pqclean.join("common");
+    let trace_include = manifest_dir.join("c/include");
 
     if !scheme_clean.join("sign.c").exists() {
         println!(
@@ -21,13 +22,18 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", scheme_clean.display());
     println!("cargo:rerun-if-changed={}", common.join("sha2.c").display());
+    println!("cargo:rerun-if-changed={}", manifest_dir.join("c/spx_sha256_trace.c").display());
 
     let mut build = cc::Build::new();
     build
         .std("c11")
         .flag("-Wno-unused-parameter")
+        .define("SPX_SHA256_TRACE", None)
         .include(&scheme_clean)
-        .include(&common);
+        .include(&common)
+        .include(&trace_include);
+
+    build.file(manifest_dir.join("c/spx_sha256_trace.c"));
 
     for name in [
         "address",
@@ -45,6 +51,8 @@ fn main() {
         build.file(scheme_clean.join(format!("{name}.c")));
     }
     build.file(common.join("sha2.c"));
+    // Deterministic stub instead of OS RNG (this crate is for circuits / tests).
+    build.file(manifest_dir.join("c/randombytes_stub.c"));
     build.compile("pqclean_sphincs_sha2_128s_simple");
 
     println!("cargo:rustc-cfg=pqclean_linked");

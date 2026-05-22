@@ -9,6 +9,10 @@
 
 #include "sha2.h"
 
+#ifdef SPX_SHA256_TRACE
+#include "spx_sha256_trace.h"
+#endif
+
 static uint32_t load_bigendian_32(const uint8_t *x) {
     return (uint32_t)(x[3]) | (((uint32_t)(x[2])) << 8) |
            (((uint32_t)(x[1])) << 16) | (((uint32_t)(x[0])) << 24);
@@ -161,6 +165,20 @@ static size_t crypto_hashblocks_sha256(uint8_t *statebytes,
     state[7] = h;
 
     while (inlen >= 64) {
+#ifdef SPX_SHA256_TRACE
+        uint8_t spx_h_in[32];
+        uint8_t spx_block[64];
+        uint8_t spx_h_out[32];
+        store_bigendian_32(spx_h_in + 0, a);
+        store_bigendian_32(spx_h_in + 4, b);
+        store_bigendian_32(spx_h_in + 8, c);
+        store_bigendian_32(spx_h_in + 12, d);
+        store_bigendian_32(spx_h_in + 16, e);
+        store_bigendian_32(spx_h_in + 20, f);
+        store_bigendian_32(spx_h_in + 24, g);
+        store_bigendian_32(spx_h_in + 28, h);
+        memcpy(spx_block, in, 64);
+#endif
         uint32_t w0  = load_bigendian_32(in + 0);
         uint32_t w1  = load_bigendian_32(in + 4);
         uint32_t w2  = load_bigendian_32(in + 8);
@@ -269,6 +287,18 @@ static size_t crypto_hashblocks_sha256(uint8_t *statebytes,
         state[5] = f;
         state[6] = g;
         state[7] = h;
+
+#ifdef SPX_SHA256_TRACE
+        store_bigendian_32(spx_h_out + 0, state[0]);
+        store_bigendian_32(spx_h_out + 4, state[1]);
+        store_bigendian_32(spx_h_out + 8, state[2]);
+        store_bigendian_32(spx_h_out + 12, state[3]);
+        store_bigendian_32(spx_h_out + 16, state[4]);
+        store_bigendian_32(spx_h_out + 20, state[5]);
+        store_bigendian_32(spx_h_out + 24, state[6]);
+        store_bigendian_32(spx_h_out + 28, state[7]);
+        spx_sha256_trace_record(spx_h_in, spx_block, spx_h_out);
+#endif
 
         in += 64;
         inlen -= 64;

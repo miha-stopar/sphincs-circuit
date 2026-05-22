@@ -121,9 +121,9 @@ pub struct Sha256Trace {
 
 **Not** an estimate from parameter formulas — an **execution log** of PQClean.
 
-### Hook (planned)
+### Hook (implemented)
 
-When built with `-DSPX_SHA256_TRACE` ([`build.rs`](../crates/sphincs-ref/build.rs)), each compression in [`crypto_hashblocks_sha256`](../third_party/PQClean/common/sha2.c) will record:
+When built with `-DSPX_SHA256_TRACE` ([`build.rs`](../crates/sphincs-ref/build.rs)), each compression in [`crypto_hashblocks_sha256`](../third_party/PQClean/common/sha2.c) records:
 
 
 ```c
@@ -149,6 +149,12 @@ struct CompressionRecord {
     pos_in_call: usize,
 }
 ```
+
+Rust API: [`verify_with_trace`](../crates/sphincs-ref/src/lib.rs) → [`trace_collect`](../crates/sphincs-ref/src/trace.rs).
+
+CLI: `cargo run -p sphincs-ref --bin sphincs-trace-stats` ([`trace_stats.rs`](../crates/sphincs-ref/src/bin/trace_stats.rs)).
+
+Measured: **~2184–2296** compressions for 33–512 byte messages (verify only).
 
 ### Why exact list matters
 

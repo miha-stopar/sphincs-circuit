@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/circuit-spec",
     "crates/sphincs-ref",
+    "crates/sphincs-circuit",
 ]
 
 [workspace.package]

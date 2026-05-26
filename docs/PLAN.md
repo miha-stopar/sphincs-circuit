@@ -137,13 +137,13 @@ No trusted setup. Groth16 not used.
 - [x] `sphincs-ref`: wrap `crypto_sign_verify`
 - [x] Instrument SHA-256: emit compression trace on verify (`SPX_SHA256_TRACE` in `sha2.c`)
 - [x] `verify_with_trace`, `sign_deterministic`, tests + `sphincs-trace-stats` binary
-- [ ] Export trace JSON for circuit witness generator (M1)
+- [x] Export trace JSON for circuit witness generator (`trace_to_json`)
 
 ### M1 — Step circuit (2–3 weeks)
 
-- [ ] Bit-accurate `sha256_compress` in Circom/bellpepper
-- [ ] Test: trace witness satisfies `C_step` for each compression
-- [ ] Constraint count per compression
+- [x] Bit-accurate `sha256_compress` in bellpepper (`crates/sphincs-circuit`)
+- [x] Test: trace witness satisfies `C_step` for each compression (first 20 rows + neg test)
+- [x] Constraint count per compression (~19.5k on BLS12-381 test CS)
 
 ### M2 — Core sub-gadgets (4–6 weeks)
 

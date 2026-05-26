@@ -97,6 +97,40 @@ pub struct Sha256Compression {
     pub h_out: [u8; 32],
 }
 
+/// Export compression trace as JSON for the circuit witness generator.
+pub fn trace_to_json(trace: &Sha256Trace) -> Result<String, serde_json::Error> {
+    #[derive(serde::Serialize)]
+    struct RowJson {
+        index: usize,
+        h_in: String,
+        block: String,
+        h_out: String,
+    }
+    #[derive(serde::Serialize)]
+    struct TraceJson {
+        compressions: Vec<RowJson>,
+    }
+
+    let rows = trace
+        .compressions
+        .iter()
+        .map(|c| RowJson {
+            index: c.index,
+            h_in: hex_bytes(&c.h_in),
+            block: hex_bytes(&c.block),
+            h_out: hex_bytes(&c.h_out),
+        })
+        .collect();
+
+    serde_json::to_string_pretty(&TraceJson {
+        compressions: rows,
+    })
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Run verify and record every compression via hook in [`sha2.c`](../../third_party/PQClean/common/sha2.c).
 pub fn verify_with_trace(
     pk: &[u8; SPHINCS_PK_BYTES],
@@ -206,6 +240,19 @@ mod tests {
             .filter(|w| w[0].h_out == w[1].h_in)
             .count();
         assert!(local > 0, "expected some within-hash links, got {local}");
+    }
+
+    #[cfg(pqclean_linked)]
+    #[test]
+    fn trace_to_json_roundtrip_shape() {
+        let seed = [2u8; CRYPTO_SEEDBYTES];
+        let msg = b"json export";
+        let (pk, sig) = sign_deterministic(&seed, msg).unwrap();
+        let trace = verify_with_trace(&pk, msg, &sig).unwrap();
+        let json = trace_to_json(&trace).unwrap();
+        assert!(json.contains("\"h_in\""));
+        assert!(json.contains("\"compressions\""));
+        assert!(trace.len() > 0);
     }
 
     #[cfg(pqclean_linked)]

@@ -11,6 +11,8 @@ pqclean = []
 
 [dependencies]
 circuit-spec = { path = "../circuit-spec" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [build-dependencies]
 cc = "1.2"

@@ -1,0 +1,16 @@
+[package]
+name = "sphincs-circuit"
+version = "0.1.0"
+description = "R1CS circuits for ZK proof of SPHINCS+ verify (Track A)"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+bellpepper = "0.4.1"
+bellpepper-core = "0.4.0"
+ff = "0.13"
+circuit-spec = { path = "../circuit-spec" }
+
+[dev-dependencies]
+blstrs = "0.7"
+sphincs-ref = { path = "../sphincs-ref" }

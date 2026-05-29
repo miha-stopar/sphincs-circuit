@@ -268,6 +268,47 @@ pub fn compute_root_oracle(
     out
 }
 
+/// SPHINCS+-SHA2-128s WOTS+ signature length in bytes (`SPX_WOTS_LEN * SPX_N`).
+pub const WOTS_BYTES: usize = 560;
+
+/// Ground-truth `wots_pk_from_sig` output (560 bytes) for circuit validation.
+///
+/// Mirrors PQClean `wots.c:wots_pk_from_sig`: derives the per-chain lengths from
+/// `msg` (base-w digits + checksum) and walks each of the 35 Winternitz chains
+/// from the signature value up to the top, returning the recovered WOTS+ public
+/// key. `addr` is the 22-byte base address with type=WOTS and layer/tree/keypair
+/// already set.
+#[cfg(pqclean_linked)]
+pub fn wots_pk_from_sig_oracle(
+    pub_seed: &[u8; 16],
+    addr: &[u8; 22],
+    sig: &[u8; WOTS_BYTES],
+    msg: &[u8; 16],
+) -> [u8; WOTS_BYTES] {
+    extern "C" {
+        fn spx_wots_pk_from_sig_oracle(
+            pk: *mut u8,
+            pub_seed: *const u8,
+            addr_bytes: *const u8,
+            sig: *const u8,
+            msg: *const u8,
+        );
+    }
+
+    let _guard = pqclean_guard();
+    let mut pk = [0u8; WOTS_BYTES];
+    unsafe {
+        spx_wots_pk_from_sig_oracle(
+            pk.as_mut_ptr(),
+            pub_seed.as_ptr(),
+            addr.as_ptr(),
+            sig.as_ptr(),
+            msg.as_ptr(),
+        );
+    }
+    pk
+}
+
 /// Seed the deterministic PRNG with no locking; callers must hold the guard.
 #[cfg(pqclean_linked)]
 fn reset_signing_rng_inner(seed: u64) {

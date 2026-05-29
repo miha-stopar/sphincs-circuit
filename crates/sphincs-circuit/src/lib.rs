@@ -10,10 +10,15 @@ pub mod merkle;
 pub mod sha256_compress;
 pub mod step;
 pub mod thash;
+pub mod wots;
 
 pub use merkle::synthesize_compute_root;
 pub use sha256_compress::{synthesize_compression, synthesize_compression_with_stats, StepStats};
 pub use step::{StepCircuit, StepInput};
 pub use thash::{
     synthesize_thash, synthesize_thash_with_stats, thash_digest_bits, thash_preimage, ThashStats,
+};
+pub use wots::{
+    chain_lengths, gen_chain, synthesize_wots_pk_from_sig, wots_pk_from_sig_bits, SPX_WOTS_BYTES,
+    SPX_WOTS_LEN,
 };

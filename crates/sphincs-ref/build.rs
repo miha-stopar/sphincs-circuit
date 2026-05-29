@@ -25,6 +25,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", manifest_dir.join("c/spx_sha256_trace.c").display());
     println!("cargo:rerun-if-changed={}", manifest_dir.join("c/spx_thash_oracle.c").display());
     println!("cargo:rerun-if-changed={}", manifest_dir.join("c/spx_compute_root_oracle.c").display());
+    println!("cargo:rerun-if-changed={}", manifest_dir.join("c/spx_wots_oracle.c").display());
 
     let mut build = cc::Build::new();
     build
@@ -38,6 +39,7 @@ fn main() {
     build.file(manifest_dir.join("c/spx_sha256_trace.c"));
     build.file(manifest_dir.join("c/spx_thash_oracle.c"));
     build.file(manifest_dir.join("c/spx_compute_root_oracle.c"));
+    build.file(manifest_dir.join("c/spx_wots_oracle.c"));
 
     for name in [
         "address",

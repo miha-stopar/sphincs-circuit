@@ -7,7 +7,7 @@
 //! children) is hashed to a 16-byte parent, then combined with the next
 //! `auth_path` sibling. The 16-byte output of one level is **wired** into the
 //! next level via [`crate::thash::thash_digest_bits`] — this is the in-circuit
-//! "chain linking" that folding alone does not provide (see `folding-demo`).
+//! "chain linking" that folding alone does not provide.
 //!
 //! `leaf_idx` / `idx_offset` are treated as known at synthesis time (the circuit
 //! structure follows the same branches as the C reference). The left/right

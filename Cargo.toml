@@ -4,7 +4,6 @@ members = [
     "crates/circuit-spec",
     "crates/sphincs-ref",
     "crates/sphincs-circuit",
-    "crates/folding-demo",
 ]
 
 [workspace.package]

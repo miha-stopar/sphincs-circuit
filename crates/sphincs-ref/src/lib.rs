@@ -213,6 +213,61 @@ pub fn thash_oracle(pub_seed: &[u8; 16], addr: &[u8; 22], input: &[u8]) -> [u8; 
     out
 }
 
+/// Ground-truth `compute_root` output (16 bytes) for circuit validation.
+///
+/// Mirrors PQClean `utils.c:compute_root`: reconstructs a Merkle root from a
+/// `leaf` and an `auth_path` of `tree_height` sibling nodes, using `leaf_idx`
+/// (and `idx_offset`) to decide left/right placement and tree-index addresses.
+/// `addr` is the 22-byte base address with type/layer/tree/keypair already set.
+///
+/// `auth_path.len()` must equal `tree_height as usize * 16`.
+#[cfg(pqclean_linked)]
+#[allow(clippy::too_many_arguments)]
+pub fn compute_root_oracle(
+    pub_seed: &[u8; 16],
+    addr: &[u8; 22],
+    leaf: &[u8; 16],
+    leaf_idx: u32,
+    idx_offset: u32,
+    auth_path: &[u8],
+    tree_height: u32,
+) -> [u8; 16] {
+    assert_eq!(
+        auth_path.len(),
+        tree_height as usize * 16,
+        "auth_path must be tree_height SPX_N-blocks"
+    );
+
+    extern "C" {
+        fn spx_compute_root_oracle(
+            out: *mut u8,
+            pub_seed: *const u8,
+            addr_bytes: *const u8,
+            leaf: *const u8,
+            leaf_idx: u32,
+            idx_offset: u32,
+            auth_path: *const u8,
+            tree_height: u32,
+        );
+    }
+
+    let _guard = pqclean_guard();
+    let mut out = [0u8; 16];
+    unsafe {
+        spx_compute_root_oracle(
+            out.as_mut_ptr(),
+            pub_seed.as_ptr(),
+            addr.as_ptr(),
+            leaf.as_ptr(),
+            leaf_idx,
+            idx_offset,
+            auth_path.as_ptr(),
+            tree_height,
+        );
+    }
+    out
+}
+
 /// Seed the deterministic PRNG with no locking; callers must hold the guard.
 #[cfg(pqclean_linked)]
 fn reset_signing_rng_inner(seed: u64) {
@@ -365,6 +420,25 @@ mod tests {
             let out = thash_oracle(&pub_seed, &addr, &input);
             assert_ne!(out, [0u8; 16], "inblocks={inblocks} produced zero output");
         }
+    }
+
+    #[cfg(pqclean_linked)]
+    #[test]
+    fn compute_root_oracle_is_deterministic_and_parity_sensitive() {
+        let pub_seed = [0x44u8; 16];
+        let addr = [0x55u8; 22];
+        let leaf = [0x66u8; 16];
+        let tree_height = 9u32;
+        let auth: Vec<u8> = (0..tree_height as usize * 16).map(|i| i as u8).collect();
+
+        let a = compute_root_oracle(&pub_seed, &addr, &leaf, 0, 0, &auth, tree_height);
+        let b = compute_root_oracle(&pub_seed, &addr, &leaf, 0, 0, &auth, tree_height);
+        assert_eq!(a, b, "compute_root must be deterministic");
+        assert_ne!(a, [0u8; 16]);
+
+        // Flipping leaf_idx parity changes left/right placement → different root.
+        let odd = compute_root_oracle(&pub_seed, &addr, &leaf, 1, 0, &auth, tree_height);
+        assert_ne!(odd, a, "parity of leaf_idx must affect the root");
     }
 
     #[cfg(pqclean_linked)]

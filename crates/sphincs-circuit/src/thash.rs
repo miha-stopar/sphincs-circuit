@@ -60,6 +60,83 @@ fn bytes_to_bits_be(bytes: &[u8]) -> Vec<bool> {
     bits
 }
 
+/// Allocate `bytes` as big-endian witness bits.
+pub fn alloc_input_bits<Scalar, CS>(
+    cs: &mut CS,
+    label: &str,
+    bytes: &[u8],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    bytes_to_bits_be(bytes)
+        .into_iter()
+        .enumerate()
+        .map(|(i, b)| {
+            AllocatedBit::alloc(cs.namespace(|| format!("{label}_bit_{i}")), Some(b))
+                .map(Boolean::from)
+        })
+        .collect()
+}
+
+/// Core `thash` as a composable gadget: returns the 128 output bits
+/// (`SHA256(pub_seed ‖ 0^{48} ‖ addr ‖ in)[0:16]`) so the result can be wired
+/// into the next gadget (a Merkle parent, a WOTS chain step, …).
+///
+/// `in_bits` carries the `in` argument (`inblocks · SPX_N` bytes, big-endian);
+/// it may be freshly allocated witness bits or forwarded from a previous gadget.
+/// `pub_seed` and `addr` are treated as compile-time constants here (they come
+/// from the public key and the deterministic address structure).
+pub fn thash_digest_bits<Scalar, CS>(
+    mut cs: CS,
+    pub_seed: &[u8; SPX_N],
+    addr: &[u8; ADDR_BYTES],
+    in_bits: &[Boolean],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    debug_assert_eq!(in_bits.len() % (SPX_N * 8), 0, "in_bits must be whole blocks");
+
+    // Constant prefix: pub_seed(16) ‖ zeros(48) ‖ addr(22).
+    let mut prefix = Vec::with_capacity(SEED_BLOCK_BYTES + ADDR_BYTES);
+    prefix.extend_from_slice(pub_seed);
+    prefix.resize(SEED_BLOCK_BYTES, 0u8);
+    prefix.extend_from_slice(addr);
+
+    let mut preimage_bits: Vec<Boolean> = bytes_to_bits_be(&prefix)
+        .into_iter()
+        .map(Boolean::constant)
+        .collect();
+    preimage_bits.extend_from_slice(in_bits);
+
+    let digest = sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
+    Ok(digest.into_iter().take(SPX_N * 8).collect())
+}
+
+/// Enforce that a 128-bit digest equals the 16-byte `expected` value.
+pub fn enforce_digest_equals<Scalar, CS>(
+    mut cs: CS,
+    digest_bits: &[Boolean],
+    expected: &[u8; SPX_N],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let expected_bits = bytes_to_bits_be(expected);
+    for (i, (computed, &exp)) in digest_bits.iter().zip(expected_bits.iter()).enumerate() {
+        Boolean::enforce_equal(
+            cs.namespace(|| format!("out_bit_{i}")),
+            computed,
+            &Boolean::constant(exp),
+        )?;
+    }
+    Ok(())
+}
+
 /// Synthesize `thash`: constrain `SHA256(preimage)[0:16] == expected_out`.
 ///
 /// All preimage bits are allocated as witness variables (so this produces a
@@ -77,33 +154,12 @@ where
     Scalar: ff::PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    let preimage = thash_preimage(pub_seed, addr, input);
+    assert_eq!(input.len() % SPX_N, 0, "input must be whole SPX_N blocks");
+    assert!(!input.is_empty(), "thash needs at least one block");
 
-    let input_bits = bytes_to_bits_be(&preimage)
-        .into_iter()
-        .enumerate()
-        .map(|(i, b)| {
-            AllocatedBit::alloc(cs.namespace(|| format!("preimage_bit_{i}")), Some(b))
-                .map(Boolean::from)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let digest = sha256(cs.namespace(|| "sha256"), &input_bits)?;
-
-    let expected_bits = bytes_to_bits_be(expected_out);
-    for (i, (computed, &exp)) in digest
-        .iter()
-        .take(SPX_N * 8)
-        .zip(expected_bits.iter())
-        .enumerate()
-    {
-        Boolean::enforce_equal(
-            cs.namespace(|| format!("out_bit_{i}")),
-            computed,
-            &Boolean::constant(exp),
-        )?;
-    }
-    Ok(())
+    let in_bits = alloc_input_bits(&mut cs, "in", input)?;
+    let digest = thash_digest_bits(cs.namespace(|| "thash"), pub_seed, addr, &in_bits)?;
+    enforce_digest_equals(cs.namespace(|| "eq"), &digest, expected_out)
 }
 
 /// Like [`synthesize_thash`], also returning constraint count (test / bench helper).

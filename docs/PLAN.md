@@ -147,11 +147,11 @@ No trusted setup. Groth16 not used.
 
 ### M2 — Core sub-gadgets (4–6 weeks)
 
-- [x] `thash` (fixed `inblocks` ∈ {1, 2, 14, 35}) — `crates/sphincs-circuit/src/thash.rs`, validated bit-for-bit vs PQClean (`thash_oracle`)
+- [x] `thash` (fixed `inblocks` ∈ {1, 2, 14, 35}) — `crates/sphincs-circuit/src/thash.rs`, validated bit-for-bit vs PQClean (`thash_oracle`). Exposes composable `thash_digest_bits` (returns output wires).
+- [x] `compute_root` × (FORS height 12 + HT height 9) — `crates/sphincs-circuit/src/merkle.rs`, chains `thash(2)` per level, validated bit-for-bit vs PQClean (`compute_root_oracle`) across both parities
 - [ ] `hash_message` + `mgf1` for bounded `M_max`
 - [ ] `fors_pk_from_sig`
 - [ ] `wots_pk_from_sig` + `gen_chain`
-- [ ] `compute_root` × (FORS height + HT height)
 - [ ] End-to-end witness gen from PQClean trace vs circuit witness diff
 
 ### M3 — Folding + prove (3–4 weeks)

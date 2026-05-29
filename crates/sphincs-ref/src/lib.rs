@@ -6,6 +6,20 @@ mod trace;
 
 pub use circuit_spec::{MESSAGE_MAX_BYTES, SPHINCS_PK_BYTES, SPHINCS_SIG_BYTES};
 
+use std::sync::Mutex;
+
+/// PQClean uses process-global mutable state: the SHA-256 compression trace
+/// buffer (written by the instrumented `common/sha2.c`) and the deterministic
+/// RNG stub. Tests run multi-threaded, so every entry point that touches that
+/// state must hold this lock to avoid data races. Poison is ignored because the
+/// only invariant the lock protects is "one PQClean call at a time".
+static PQCLEAN_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(pqclean_linked)]
+fn pqclean_guard() -> std::sync::MutexGuard<'static, ()> {
+    PQCLEAN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     NotLinked,
@@ -44,24 +58,35 @@ extern "C" {
     ) -> i32;
 }
 
+/// FFI verify with no locking; callers must hold [`pqclean_guard`].
+#[cfg(pqclean_linked)]
+fn verify_inner(
+    pk: &[u8; SPHINCS_PK_BYTES],
+    msg: &[u8],
+    sig: &[u8; SPHINCS_SIG_BYTES],
+) -> Result<(), Error> {
+    let rc = unsafe {
+        PQCLEAN_SPHINCSSHA2128SSIMPLE_CLEAN_crypto_sign_verify(
+            sig.as_ptr(),
+            sig.len(),
+            msg.as_ptr(),
+            msg.len(),
+            pk.as_ptr(),
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(Error::VerifyFailed)
+    }
+}
+
 /// Verify detached signature — [`sign.c` `crypto_sign_verify`](../../third_party/PQClean/crypto_sign/sphincs-sha2-128s-simple/clean/sign.c).
 pub fn verify(pk: &[u8; SPHINCS_PK_BYTES], msg: &[u8], sig: &[u8; SPHINCS_SIG_BYTES]) -> Result<(), Error> {
     #[cfg(pqclean_linked)]
     {
-        let rc = unsafe {
-            PQCLEAN_SPHINCSSHA2128SSIMPLE_CLEAN_crypto_sign_verify(
-                sig.as_ptr(),
-                sig.len(),
-                msg.as_ptr(),
-                msg.len(),
-                pk.as_ptr(),
-            )
-        };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(Error::VerifyFailed)
-        }
+        let _guard = pqclean_guard();
+        verify_inner(pk, msg, sig)
     }
     #[cfg(not(pqclean_linked))]
     {
@@ -139,8 +164,9 @@ pub fn verify_with_trace(
 ) -> Result<Sha256Trace, Error> {
     #[cfg(pqclean_linked)]
     {
+        let _guard = pqclean_guard();
         trace::trace_reset();
-        verify(pk, msg, sig)?;
+        verify_inner(pk, msg, sig)?;
         Ok(trace::trace_collect())
     }
     #[cfg(not(pqclean_linked))]
@@ -150,14 +176,58 @@ pub fn verify_with_trace(
     }
 }
 
-/// Deterministic keypair + signature for tests (NIST KAT–style seed).
-/// Reset the deterministic PRNG used by PQClean signing ([`randombytes_stub.c`](c/randombytes_stub.c)).
+/// Ground-truth `thash` output (16 bytes) for circuit validation.
+///
+/// Mirrors PQClean `thash_sha2_simple.c`: seeds a context with `pub_seed`,
+/// then hashes `addr ‖ in` under the seeded state. Equivalent to
+/// `SHA256(pub_seed ‖ zeros(48) ‖ addr ‖ in)[0..16]` (see the alignment test).
+///
+/// `input` must be a whole number of `SPX_N` (16-byte) blocks; `inblocks >= 1`.
 #[cfg(pqclean_linked)]
-pub fn reset_signing_rng(seed: u64) {
+pub fn thash_oracle(pub_seed: &[u8; 16], addr: &[u8; 22], input: &[u8]) -> [u8; 16] {
+    assert_eq!(input.len() % 16, 0, "input must be whole SPX_N blocks");
+    let inblocks = input.len() / 16;
+    assert!(inblocks >= 1, "thash needs at least one block");
+
+    extern "C" {
+        fn spx_thash_oracle(
+            out: *mut u8,
+            pub_seed: *const u8,
+            addr_bytes: *const u8,
+            input: *const u8,
+            inblocks: u32,
+        );
+    }
+
+    let _guard = pqclean_guard();
+    let mut out = [0u8; 16];
+    unsafe {
+        spx_thash_oracle(
+            out.as_mut_ptr(),
+            pub_seed.as_ptr(),
+            addr.as_ptr(),
+            input.as_ptr(),
+            inblocks as u32,
+        );
+    }
+    out
+}
+
+/// Seed the deterministic PRNG with no locking; callers must hold the guard.
+#[cfg(pqclean_linked)]
+fn reset_signing_rng_inner(seed: u64) {
     extern "C" {
         fn randombytes_seed(seed: u64);
     }
     unsafe { randombytes_seed(seed) }
+}
+
+/// Deterministic keypair + signature for tests (NIST KAT–style seed).
+/// Reset the deterministic PRNG used by PQClean signing ([`randombytes_stub.c`](c/randombytes_stub.c)).
+#[cfg(pqclean_linked)]
+pub fn reset_signing_rng(seed: u64) {
+    let _guard = pqclean_guard();
+    reset_signing_rng_inner(seed);
 }
 
 /// Keypair + detached signature using deterministic RNG (reproducible tests).
@@ -166,7 +236,8 @@ pub fn sign_deterministic(
     seed: &[u8; CRYPTO_SEEDBYTES],
     msg: &[u8],
 ) -> Result<([u8; SPHINCS_PK_BYTES], [u8; SPHINCS_SIG_BYTES]), Error> {
-    reset_signing_rng(u64::from_le_bytes([
+    let _guard = pqclean_guard();
+    reset_signing_rng_inner(u64::from_le_bytes([
         seed[0], seed[1], seed[2], seed[3], seed[4], seed[5], seed[6], seed[7],
     ]));
     let mut pk = [0u8; SPHINCS_PK_BYTES];
@@ -253,6 +324,47 @@ mod tests {
         assert!(json.contains("\"h_in\""));
         assert!(json.contains("\"compressions\""));
         assert!(trace.len() > 0);
+    }
+
+    #[cfg(pqclean_linked)]
+    #[test]
+    fn thash_oracle_is_deterministic_and_input_sensitive() {
+        let pub_seed = [0x11u8; 16];
+        let addr = [0x22u8; 22];
+        let input = [0x33u8; 16];
+
+        let a = thash_oracle(&pub_seed, &addr, &input);
+        let b = thash_oracle(&pub_seed, &addr, &input);
+        assert_eq!(a, b, "thash must be deterministic");
+        assert_ne!(a, [0u8; 16], "output should not be all-zero");
+
+        // Changing the address changes the output (domain separation).
+        let mut addr2 = addr;
+        addr2[0] ^= 1;
+        assert_ne!(thash_oracle(&pub_seed, &addr2, &input), a);
+
+        // Changing the input changes the output.
+        let mut input2 = input;
+        input2[3] ^= 1;
+        assert_ne!(thash_oracle(&pub_seed, &addr, &input2), a);
+
+        // Changing the seed changes the output.
+        let mut seed2 = pub_seed;
+        seed2[7] ^= 1;
+        assert_ne!(thash_oracle(&seed2, &addr, &input), a);
+    }
+
+    #[cfg(pqclean_linked)]
+    #[test]
+    fn thash_oracle_supports_multiblock_inputs() {
+        let pub_seed = [5u8; 16];
+        let addr = [9u8; 22];
+        // inblocks used in SPHINCS+ verify: 1 (chain/leaf), 2 (Merkle), 14 (FORS root), 35 (WOTS leaf).
+        for inblocks in [1usize, 2, 14, 35] {
+            let input = vec![0x5au8; inblocks * 16];
+            let out = thash_oracle(&pub_seed, &addr, &input);
+            assert_ne!(out, [0u8; 16], "inblocks={inblocks} produced zero output");
+        }
     }
 
     #[cfg(pqclean_linked)]

@@ -147,7 +147,7 @@ No trusted setup. Groth16 not used.
 
 ### M2 — Core sub-gadgets (4–6 weeks)
 
-- [ ] `thash` (fixed `inblocks` ∈ {1, 2, 14, 35})
+- [x] `thash` (fixed `inblocks` ∈ {1, 2, 14, 35}) — `crates/sphincs-circuit/src/thash.rs`, validated bit-for-bit vs PQClean (`thash_oracle`)
 - [ ] `hash_message` + `mgf1` for bounded `M_max`
 - [ ] `fors_pk_from_sig`
 - [ ] `wots_pk_from_sig` + `gen_chain`

@@ -23,6 +23,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", scheme_clean.display());
     println!("cargo:rerun-if-changed={}", common.join("sha2.c").display());
     println!("cargo:rerun-if-changed={}", manifest_dir.join("c/spx_sha256_trace.c").display());
+    println!("cargo:rerun-if-changed={}", manifest_dir.join("c/spx_thash_oracle.c").display());
 
     let mut build = cc::Build::new();
     build
@@ -34,6 +35,7 @@ fn main() {
         .include(&trace_include);
 
     build.file(manifest_dir.join("c/spx_sha256_trace.c"));
+    build.file(manifest_dir.join("c/spx_thash_oracle.c"));
 
     for name in [
         "address",

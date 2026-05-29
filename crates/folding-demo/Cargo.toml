@@ -1,0 +1,14 @@
+[package]
+name = "folding-demo"
+version = "0.1.0"
+description = "Pedagogical Nova-style folding integrated with a separate (non-folded) core circuit"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ff = "0.13"
+blstrs = "0.7"
+
+[[bin]]
+name = "walkthrough"
+path = "src/bin/walkthrough.rs"

@@ -3,7 +3,10 @@
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper::gadgets::sha256::sha256_compression_function;
 use bellpepper::gadgets::uint32::UInt32;
-use bellpepper_core::{ConstraintSystem, SynthesisError};
+use bellpepper_core::{
+    boolean::AllocatedBit,
+    ConstraintSystem, SynthesisError,
+};
 
 /// Statistics from synthesizing a single step instance (requires `Comparable` CS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +32,24 @@ fn block_to_block_bits(block: &[u8; 64]) -> Vec<Boolean> {
         }
     }
     bits
+}
+
+fn block_to_allocated_bits<Scalar, CS>(
+    mut cs: CS,
+    block: &[u8; 64],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    block
+        .iter()
+        .flat_map(|byte| (0..8).rev().map(move |i| (byte >> i) & 1 == 1))
+        .enumerate()
+        .map(|(i, b)| {
+            AllocatedBit::alloc(cs.namespace(|| format!("block bit {i}")), Some(b)).map(Boolean::from)
+        })
+        .collect()
 }
 
 fn words_from_state_bytes<Scalar, CS>(
@@ -73,6 +94,35 @@ where
     Ok(())
 }
 
+/// Like [`enforce_state_equal`], but expected output words are allocated witnesses.
+///
+/// NeutronNova requires output pins to be witnesses, not constants (see
+/// `synthesize_compression_allocated_block`).
+fn enforce_state_equal_allocated<Scalar, CS>(
+    mut cs: CS,
+    computed: &[UInt32],
+    expected_bytes: &[u8; 32],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let expected_words = state_bytes_to_words(expected_bytes);
+    for (i, (c, &e)) in computed.iter().zip(expected_words.iter()).enumerate() {
+        let exp = UInt32::alloc(cs.namespace(|| format!("h_out_w{i}")), Some(e))?;
+        for (j, (a, b)) in c
+            .clone()
+            .into_bits_be()
+            .iter()
+            .zip(exp.into_bits_be().iter())
+            .enumerate()
+        {
+            Boolean::enforce_equal(cs.namespace(|| format!("h_out_{i}_{j}")), a, b)?;
+        }
+    }
+    Ok(())
+}
+
 /// Synthesize `C_step`: constrain `h_out = Compress(h_in, block)`.
 pub fn synthesize_compression<Scalar, CS>(
     mut cs: CS,
@@ -94,6 +144,61 @@ where
     )?;
 
     enforce_state_equal(
+        cs.namespace(|| "h_out_eq"),
+        &out_words,
+        h_out,
+    )
+}
+
+/// NeutronNova step synthesis: allocated `h_in` + block bits; output follows from compression.
+///
+/// Omits explicit `h_out` equality because pinning digest bytes breaks NeutronNova verify
+/// (Spartan2 0.9.0); output is still uniquely determined by `(h_in, block)`.
+pub fn synthesize_compression_for_fold<Scalar, CS>(
+    mut cs: CS,
+    h_in: &[u8; 32],
+    block: &[u8; 64],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let h_words = words_from_state_bytes(cs.namespace(|| "h_in"), "h_in", h_in)?;
+    let block_bits = block_to_allocated_bits(cs.namespace(|| "block"), block)?;
+
+    let _out_words = sha256_compression_function(
+        cs.namespace(|| "compress"),
+        &block_bits,
+        &h_words,
+    )?;
+
+    Ok(())
+}
+
+/// Like [`synthesize_compression`], but allocate the 512 block bits as witnesses.
+///
+/// Uses allocated expected `h_out` words (for oracle tests on T256). Not compatible
+/// with NeutronNova prove/verify in Spartan2 0.9.0 — use [`synthesize_compression_for_fold`].
+pub fn synthesize_compression_allocated_block<Scalar, CS>(
+    mut cs: CS,
+    h_in: &[u8; 32],
+    block: &[u8; 64],
+    h_out: &[u8; 32],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let h_words = words_from_state_bytes(cs.namespace(|| "h_in"), "h_in", h_in)?;
+    let block_bits = block_to_allocated_bits(cs.namespace(|| "block"), block)?;
+
+    let out_words = sha256_compression_function(
+        cs.namespace(|| "compress"),
+        &block_bits,
+        &h_words,
+    )?;
+
+    enforce_state_equal_allocated(
         cs.namespace(|| "h_out_eq"),
         &out_words,
         h_out,

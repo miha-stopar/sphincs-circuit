@@ -37,8 +37,8 @@ pub use thash::{
 };
 pub use verify::synthesize_verify_core;
 pub use witness::{
-    local_chain_segments, step_input_from_row, trace_stats, validate_trace_steps,
-    witness_from_trace, LocalChain, StepValidationResult, TraceStats,
+    local_chain_segments, step_input_from_row, trace_stats, witness_from_compressions,
+    LocalChain, TraceStats,
 };
 pub use wots::{
     chain_lengths, gen_chain, synthesize_wots_pk_from_sig, wots_pk_from_sig_bits, SPX_WOTS_BYTES,

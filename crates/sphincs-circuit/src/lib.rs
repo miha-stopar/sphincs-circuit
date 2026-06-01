@@ -2,7 +2,8 @@
 //!
 //! **M1:** bit-accurate one-compression step (`C_step`) using bellpepper SHA-256.
 //! **M2 (current):** full verify core sub-gadgets + top-level glue in `verify`.
-//! **Next:** NeutronNova fold, Spartan2 prove, end-to-end witness vs trace diff.
+//! **M2:** complete — verify core + trace witness alignment in `witness`.
+//! **Next:** M3 NeutronNova fold + Spartan2 prove.
 
 pub mod fors;
 pub mod hash_msg;
@@ -12,6 +13,7 @@ pub mod sha256_compress;
 pub mod step;
 pub mod thash;
 pub mod verify;
+pub mod witness;
 pub mod wots;
 
 pub use fors::{
@@ -34,6 +36,10 @@ pub use thash::{
     thash_preimage, ThashStats,
 };
 pub use verify::synthesize_verify_core;
+pub use witness::{
+    local_chain_segments, step_input_from_row, trace_stats, validate_trace_steps,
+    witness_from_trace, LocalChain, StepValidationResult, TraceStats,
+};
 pub use wots::{
     chain_lengths, gen_chain, synthesize_wots_pk_from_sig, wots_pk_from_sig_bits, SPX_WOTS_BYTES,
     SPX_WOTS_LEN,

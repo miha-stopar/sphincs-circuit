@@ -242,8 +242,6 @@ mod tests {
             s
         };
         let mut sig_off = SIG_AFTER_FORS;
-        let mut tree = hm.tree;
-        let mut idx_leaf = hm.leaf_idx;
 
         let mut fors_addr = [0u8; 22];
         fors_addr[9] = SPX_ADDR_TYPE_WOTS;

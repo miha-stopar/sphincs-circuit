@@ -154,7 +154,7 @@ No trusted setup. Groth16 not used.
 - [x] Hypertree layer glue (`wots_pk_from_sig` → leaf `thash(35)` → `compute_root(9)`) — `crates/sphincs-circuit/src/hypertree.rs`, validated vs composed PQClean oracles
 - [x] `hash_message` + `mgf1` for bounded `M_max` — `crates/sphincs-circuit/src/hash_msg.rs`, SHA256(`R‖pk‖M`) + MGF1 wired seed→output; validated vs `hash_message_oracle`
 - [x] Top-level verify core glue — `crates/sphincs-circuit/src/verify.rs`: `hash_message` → FORS → 7× hypertree → `root == PK.root` (full test `#[ignore]`, slow in debug)
-- [ ] End-to-end witness gen from PQClean trace vs circuit witness diff
+- [x] End-to-end witness from PQClean trace + `C_step` validation — `crates/sphincs-circuit/src/witness.rs` (`witness_from_trace`, `validate_trace_steps`, local chain analysis)
 
 ### M3 — Folding + prove (3–4 weeks)
 

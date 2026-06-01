@@ -116,6 +116,28 @@ where
     Ok(digest.into_iter().take(SPX_N * 8).collect())
 }
 
+/// Enforce that `bits` equals `expected` bytes (big-endian), bit-for-bit.
+pub fn enforce_bits_equal_bytes<Scalar, CS>(
+    mut cs: CS,
+    bits: &[Boolean],
+    expected: &[u8],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(bits.len(), expected.len() * 8);
+    let expected_bits = bytes_to_bits_be(expected);
+    for (i, (computed, &exp)) in bits.iter().zip(expected_bits.iter()).enumerate() {
+        Boolean::enforce_equal(
+            cs.namespace(|| format!("bit_eq_{i}")),
+            computed,
+            &Boolean::constant(exp),
+        )?;
+    }
+    Ok(())
+}
+
 /// Enforce that a 128-bit digest equals the 16-byte `expected` value.
 pub fn enforce_digest_equals<Scalar, CS>(
     mut cs: CS,

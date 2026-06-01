@@ -150,8 +150,10 @@ No trusted setup. Groth16 not used.
 - [x] `thash` (fixed `inblocks` ∈ {1, 2, 14, 35}) — `crates/sphincs-circuit/src/thash.rs`, validated bit-for-bit vs PQClean (`thash_oracle`). Exposes composable `thash_digest_bits` (returns output wires).
 - [x] `compute_root` × (FORS height 12 + HT height 9) — `crates/sphincs-circuit/src/merkle.rs`, chains `thash(2)` per level, validated bit-for-bit vs PQClean (`compute_root_oracle`) across both parities
 - [x] `wots_pk_from_sig` + `gen_chain` — `crates/sphincs-circuit/src/wots.rs`, chains `thash(1)` per Winternitz step (35 chains), validated bit-for-bit vs PQClean (`wots_pk_from_sig_oracle`)
-- [ ] `hash_message` + `mgf1` for bounded `M_max`
-- [ ] `fors_pk_from_sig`
+- [x] `fors_pk_from_sig` — `crates/sphincs-circuit/src/fors.rs`, 14× (`sk_to_leaf` + `compute_root`) + horizontal `thash(14)`, validated vs `fors_pk_from_sig_oracle`
+- [x] Hypertree layer glue (`wots_pk_from_sig` → leaf `thash(35)` → `compute_root(9)`) — `crates/sphincs-circuit/src/hypertree.rs`, validated vs composed PQClean oracles
+- [x] `hash_message` + `mgf1` for bounded `M_max` — `crates/sphincs-circuit/src/hash_msg.rs`, SHA256(`R‖pk‖M`) + MGF1 wired seed→output; validated vs `hash_message_oracle`
+- [x] Top-level verify core glue — `crates/sphincs-circuit/src/verify.rs`: `hash_message` → FORS → 7× hypertree → `root == PK.root` (full test `#[ignore]`, slow in debug)
 - [ ] End-to-end witness gen from PQClean trace vs circuit witness diff
 
 ### M3 — Folding + prove (3–4 weeks)

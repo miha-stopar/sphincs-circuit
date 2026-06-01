@@ -22,11 +22,80 @@ use bellpepper_core::{ConstraintSystem, SynthesisError};
 /// Overlay `tree_height` (offset 17) and `tree_index` (offset 18..22, big-endian
 /// `u32`) onto a copy of the base address — mirrors `set_tree_height` /
 /// `set_tree_index` in PQClean `address.c`.
-fn addr_with_height_index(base: &[u8; ADDR_BYTES], height: u32, index: u32) -> [u8; ADDR_BYTES] {
+pub fn addr_with_height_index(base: &[u8; ADDR_BYTES], height: u32, index: u32) -> [u8; ADDR_BYTES] {
     let mut a = *base;
     a[17] = height as u8;
     a[18..22].copy_from_slice(&index.to_be_bytes());
     a
+}
+
+/// Composable `compute_root`: fold `leaf_bits` up through `auth_path`, returning
+/// the 128-bit root wires (no final equality check).
+#[allow(clippy::too_many_arguments)]
+pub fn compute_root_bits<Scalar, CS>(
+    mut cs: CS,
+    pub_seed: &[u8; SPX_N],
+    addr_base: &[u8; ADDR_BYTES],
+    leaf_bits: &[Boolean],
+    leaf_idx: u32,
+    idx_offset: u32,
+    auth_path: &[u8],
+    tree_height: u32,
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let th = tree_height as usize;
+    assert!(th >= 1, "tree_height must be >= 1");
+    assert_eq!(leaf_bits.len(), SPX_N * 8, "leaf_bits must be 128 bits");
+    assert_eq!(auth_path.len(), th * SPX_N, "auth_path must be tree_height SPX_N-blocks");
+
+    let sibling_bits: Vec<Vec<Boolean>> = (0..th)
+        .map(|j| {
+            let s = &auth_path[j * SPX_N..(j + 1) * SPX_N];
+            alloc_input_bits(&mut cs, &format!("auth_{j}"), s)
+        })
+        .collect::<Result<_, _>>()?;
+
+    let mut li = leaf_idx;
+    let mut io = idx_offset;
+
+    let (mut left, mut right) = if li & 1 == 1 {
+        (sibling_bits[0].clone(), leaf_bits.to_vec())
+    } else {
+        (leaf_bits.to_vec(), sibling_bits[0].clone())
+    };
+
+    for i in 0..th - 1 {
+        li >>= 1;
+        io >>= 1;
+        let addr = addr_with_height_index(addr_base, (i + 1) as u32, li.wrapping_add(io));
+
+        let mut in_bits = left;
+        in_bits.extend_from_slice(&right);
+        let node = thash_digest_bits(
+            cs.namespace(|| format!("level_{i}")),
+            pub_seed,
+            &addr,
+            &in_bits,
+        )?;
+
+        if li & 1 == 1 {
+            right = node;
+            left = sibling_bits[i + 1].clone();
+        } else {
+            left = node;
+            right = sibling_bits[i + 1].clone();
+        }
+    }
+
+    li >>= 1;
+    io >>= 1;
+    let addr = addr_with_height_index(addr_base, tree_height, li.wrapping_add(io));
+    let mut in_bits = left;
+    in_bits.extend_from_slice(&right);
+    thash_digest_bits(cs.namespace(|| "root"), pub_seed, &addr, &in_bits)
 }
 
 /// Synthesize `compute_root`: constrain that folding the `leaf` up through the
@@ -49,63 +118,17 @@ where
     Scalar: ff::PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    let th = tree_height as usize;
-    assert!(th >= 1, "tree_height must be >= 1");
-    assert_eq!(auth_path.len(), th * SPX_N, "auth_path must be tree_height SPX_N-blocks");
-
-    // Allocate leaf + every auth_path sibling as witness bits.
     let leaf_bits = alloc_input_bits(&mut cs, "leaf", leaf)?;
-    let sibling_bits: Vec<Vec<Boolean>> = (0..th)
-        .map(|j| {
-            let s = &auth_path[j * SPX_N..(j + 1) * SPX_N];
-            alloc_input_bits(&mut cs, &format!("auth_{j}"), s)
-        })
-        .collect::<Result<_, _>>()?;
-
-    let mut li = leaf_idx;
-    let mut io = idx_offset;
-
-    // Level 0 buffer: leaf and the first sibling, ordered by leaf parity.
-    // C: if (leaf_idx & 1) { buffer.right = leaf; buffer.left = auth } else { ... }
-    let (mut left, mut right) = if li & 1 == 1 {
-        (sibling_bits[0].clone(), leaf_bits)
-    } else {
-        (leaf_bits, sibling_bits[0].clone())
-    };
-
-    // tree_height - 1 intermediate levels.
-    for i in 0..th - 1 {
-        li >>= 1;
-        io >>= 1;
-        let addr = addr_with_height_index(addr_base, (i + 1) as u32, li.wrapping_add(io));
-
-        let mut in_bits = left;
-        in_bits.extend_from_slice(&right);
-        let node = thash_digest_bits(
-            cs.namespace(|| format!("level_{i}")),
-            pub_seed,
-            &addr,
-            &in_bits,
-        )?;
-
-        // Output node becomes one child; next sibling becomes the other.
-        if li & 1 == 1 {
-            right = node;
-            left = sibling_bits[i + 1].clone();
-        } else {
-            left = node;
-            right = sibling_bits[i + 1].clone();
-        }
-    }
-
-    // Final level: hash the buffer straight into the root (no sibling copy).
-    li >>= 1;
-    io >>= 1;
-    let addr = addr_with_height_index(addr_base, tree_height, li.wrapping_add(io));
-    let mut in_bits = left;
-    in_bits.extend_from_slice(&right);
-    let root = thash_digest_bits(cs.namespace(|| "root"), pub_seed, &addr, &in_bits)?;
-
+    let root = compute_root_bits(
+        cs.namespace(|| "walk"),
+        pub_seed,
+        addr_base,
+        &leaf_bits,
+        leaf_idx,
+        idx_offset,
+        auth_path,
+        tree_height,
+    )?;
     enforce_digest_equals(cs.namespace(|| "root_eq"), &root, expected_root)
 }
 

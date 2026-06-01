@@ -309,6 +309,97 @@ pub fn wots_pk_from_sig_oracle(
     pk
 }
 
+/// FORS signature byte length (`SPX_FORS_BYTES`).
+pub const FORS_BYTES: usize = 2912;
+/// FORS message hash bytes (`SPX_FORS_MSG_BYTES`).
+pub const FORS_MSG_BYTES: usize = 21;
+
+/// Ground-truth `hash_message` for circuit validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashMessageOracleOutput {
+    pub mhash: [u8; FORS_MSG_BYTES],
+    pub tree: u64,
+    pub leaf_idx: u32,
+}
+
+/// Ground-truth `hash_message` output. Mirrors PQClean `hash_sha2.c:hash_message`.
+#[cfg(pqclean_linked)]
+pub fn hash_message_oracle(
+    r: &[u8; 16],
+    pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
+) -> HashMessageOracleOutput {
+    extern "C" {
+        fn spx_hash_message_oracle(
+            mhash: *mut u8,
+            tree: *mut u64,
+            leaf_idx: *mut u32,
+            r: *const u8,
+            pk: *const u8,
+            m: *const u8,
+            mlen: usize,
+        );
+    }
+
+    let _guard = pqclean_guard();
+    let mut mhash = [0u8; FORS_MSG_BYTES];
+    let mut tree = 0u64;
+    let mut leaf_idx = 0u32;
+    unsafe {
+        spx_hash_message_oracle(
+            mhash.as_mut_ptr(),
+            &mut tree,
+            &mut leaf_idx,
+            r.as_ptr(),
+            pk.as_ptr(),
+            message.as_ptr(),
+            mlen,
+        );
+    }
+    HashMessageOracleOutput {
+        mhash,
+        tree,
+        leaf_idx,
+    }
+}
+
+/// Ground-truth `fors_pk_from_sig` output (16 bytes) for circuit validation.
+///
+/// Mirrors PQClean `fors.c:fors_pk_from_sig`: for each of 14 height-12 trees,
+/// hashes the secret-key part to a leaf, walks the auth path to a tree root,
+/// then horizontally hashes all tree roots into the FORS public key.
+#[cfg(pqclean_linked)]
+pub fn fors_pk_from_sig_oracle(
+    pub_seed: &[u8; 16],
+    addr: &[u8; 22],
+    sig: &[u8; FORS_BYTES],
+    mhash: &[u8; FORS_MSG_BYTES],
+) -> [u8; 16] {
+    extern "C" {
+        fn spx_fors_pk_from_sig_oracle(
+            pk: *mut u8,
+            pub_seed: *const u8,
+            addr_bytes: *const u8,
+            sig: *const u8,
+            mhash: *const u8,
+        );
+    }
+
+    let _guard = pqclean_guard();
+    let mut pk = [0u8; 16];
+    unsafe {
+        spx_fors_pk_from_sig_oracle(
+            pk.as_mut_ptr(),
+            pub_seed.as_ptr(),
+            addr.as_ptr(),
+            sig.as_ptr(),
+            mhash.as_ptr(),
+        );
+    }
+    pk
+}
+
 /// Seed the deterministic PRNG with no locking; callers must hold the guard.
 #[cfg(pqclean_linked)]
 fn reset_signing_rng_inner(seed: u64) {

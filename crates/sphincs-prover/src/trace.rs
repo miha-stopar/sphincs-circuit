@@ -3,6 +3,7 @@
 use circuit_spec::Sha256Compression;
 use sphincs_circuit::witness::{local_chain_segments, step_input_from_row, LocalChain};
 
+use crate::bound::{bound_steps_from_inputs, FoldCoreBoundCircuit, FoldStepBoundCircuit};
 use crate::fold::FoldStepCircuit;
 use crate::packed::FoldPackedChainCircuit;
 
@@ -27,6 +28,39 @@ pub fn fold_steps_from_rows(rows: &[Sha256Compression]) -> Vec<FoldStepCircuit> 
     rows.iter()
         .map(|row| FoldStepCircuit::new(step_input_from_row(row)))
         .collect()
+}
+
+/// Digest stored in shared witness slot `k` (the `h_out` side of boundary `k .. k+1`).
+pub fn link_digests_from_boundary(links: &[([u8; 32], [u8; 32])]) -> Vec<[u8; 32]> {
+    links.iter().map(|(left, _)| *left).collect()
+}
+
+/// Longest local chain prefix as shared-bound step circuits + core.
+///
+/// `max_steps` must be a power of two (NeutronNova batch size). Use
+/// [`pad_steps_to_power_of_two`] on plain [`FoldStepCircuit`] batches when padding is required;
+/// padding bound steps needs an extra satisfiable link per duplicated row.
+pub fn longest_chain_bound(
+    rows: &[Sha256Compression],
+    max_steps: usize,
+) -> Option<(
+    LocalChain,
+    Vec<FoldStepBoundCircuit>,
+    FoldCoreBoundCircuit,
+    Vec<([u8; 32], [u8; 32])>,
+)> {
+    if !max_steps.is_power_of_two() {
+        return None;
+    }
+    let (chain, steps, links) = longest_chain_prefix(rows, max_steps)?;
+    let digests = link_digests_from_boundary(&links);
+    let bound = bound_steps_from_inputs(
+        &steps.iter().map(|s| *s.input()).collect::<Vec<_>>(),
+        steps.len(),
+        digests.clone(),
+    );
+    let core = FoldCoreBoundCircuit::new(digests);
+    Some((chain, bound, core, links))
 }
 
 /// `(h_out, h_in)` for each internal link `i .. i+1` inside a local chain segment.

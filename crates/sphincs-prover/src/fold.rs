@@ -3,7 +3,9 @@
 //! Follows the Spartan2 [`sha256_neutronnova`](https://github.com/microsoft/Spartan2/blob/main/benches/sha256_neutronnova.rs)
 //! pattern: `N` step instances + one core circuit → `NeutronNovaZkSNARK`.
 //!
-//! **Shared witness:** not used (`shared()` returns `[]` for step and core). See crate-root docs.
+//! **Step vs core:** folding runs on step instances only; core is a second R1CS whose
+//! constraints are combined with the folded step in the zk sum-check (not one bellpepper `cs`).
+//! See [FOLDING.md §2.4](../../docs/FOLDING.md) and `tests/fold_split_step_core.rs`.
 
 use std::marker::PhantomData;
 

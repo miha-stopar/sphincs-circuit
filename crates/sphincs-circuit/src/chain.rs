@@ -36,6 +36,26 @@ where
     Ok(())
 }
 
+/// Constrain compression output words to a trace-supplied 32-byte digest (witness).
+pub fn enforce_digest_bytes_eq_words<Scalar, CS>(
+    mut cs: CS,
+    label: &str,
+    words: &[UInt32],
+    bytes: &[u8; 32],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let expected = state_bytes_to_words(bytes);
+    let allocated: Vec<UInt32> = expected
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("{label}_exp_w{i}")), Some(w)))
+        .collect::<Result<_, _>>()?;
+    enforce_sha256_words_equal(cs.namespace(|| label), words, &allocated)
+}
+
 /// Constrain two 32-byte SHA states (8 big-endian `u32` words) to be equal.
 ///
 /// Both sides are allocated witnesses (NeutronNova-safe). Used for local-chain

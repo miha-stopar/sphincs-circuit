@@ -155,7 +155,7 @@ where
 /// Omits explicit `h_out` equality because pinning digest bytes breaks NeutronNova verify
 /// (Spartan2 0.9.0); output is still uniquely determined by `(h_in, block)`.
 pub fn synthesize_compression_for_fold<Scalar, CS>(
-    mut cs: CS,
+    cs: CS,
     h_in: &[u8; 32],
     block: &[u8; 64],
 ) -> Result<(), SynthesisError>
@@ -163,16 +163,41 @@ where
     Scalar: ff::PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    let h_words = words_from_state_bytes(cs.namespace(|| "h_in"), "h_in", h_in)?;
-    let block_bits = block_to_allocated_bits(cs.namespace(|| "block"), block)?;
+    let _out_words = synthesize_compression_for_fold_with_out(cs, h_in, block)?;
+    Ok(())
+}
 
-    let _out_words = sha256_compression_function(
+/// Like [`synthesize_compression_for_fold`], but return the compression output words for glue.
+pub fn synthesize_compression_for_fold_with_out<Scalar, CS>(
+    mut cs: CS,
+    h_in: &[u8; 32],
+    block: &[u8; 64],
+) -> Result<Vec<UInt32>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let h_words = words_from_state_bytes(cs.namespace(|| "h_in"), "h_in", h_in)?;
+    synthesize_compression_for_fold_h_words(cs, &h_words, block)
+}
+
+/// One compression with caller-supplied `h_in` words (for shared-link chaining).
+pub fn synthesize_compression_for_fold_h_words<Scalar, CS>(
+    mut cs: CS,
+    h_words: &[UInt32],
+    block: &[u8; 64],
+) -> Result<Vec<UInt32>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(h_words.len(), 8);
+    let block_bits = block_to_allocated_bits(cs.namespace(|| "block"), block)?;
+    sha256_compression_function(
         cs.namespace(|| "compress"),
         &block_bits,
-        &h_words,
-    )?;
-
-    Ok(())
+        h_words,
+    )
 }
 
 /// Like [`synthesize_compression_for_fold`], but wire `h_out[i] == h_in[i+1]` between rows.
@@ -200,6 +225,67 @@ where
     )?;
 
     for (i, row) in rows.iter().enumerate().skip(1) {
+        h_words = out_words;
+        let block_bits =
+            block_to_allocated_bits(cs.namespace(|| format!("block_{i}")), &row.1)?;
+        out_words = sha256_compression_function(
+            cs.namespace(|| format!("compress_{i}")),
+            &block_bits,
+            &h_words,
+        )?;
+    }
+
+    let expected = words_from_state_bytes(
+        cs.namespace(|| "h_out_last"),
+        "h_out_last",
+        &rows[rows.len() - 1].2,
+    )?;
+    enforce_sha256_words_equal(cs.namespace(|| "last_out_eq"), &out_words, &expected)?;
+
+    Ok(())
+}
+
+/// Like [`synthesize_compression_chain_for_fold`], plus **core glue**: at each internal
+/// boundary `i`, the compression output wires for row `i` equal `links[i].0` and `links[i].1`
+/// (trace-supplied). Row `i+1` already uses those wires as `h_in`, so this binds the core’s
+/// boundary witnesses to the folded step wires in one Spartan circuit.
+pub fn synthesize_compression_chain_for_fold_with_links<Scalar, CS>(
+    mut cs: CS,
+    rows: &[([u8; 32], [u8; 64], [u8; 32])],
+    links: &[([u8; 32], [u8; 32])],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    use crate::chain::{enforce_digest_bytes_eq_words, enforce_sha256_words_equal};
+
+    assert!(rows.len() >= 2);
+    assert_eq!(links.len(), rows.len() - 1);
+
+    let block_bits_0 = block_to_allocated_bits(cs.namespace(|| "block_0"), &rows[0].1)?;
+    let mut h_words = words_from_state_bytes(cs.namespace(|| "h_in_0"), "h_in_0", &rows[0].0)?;
+    let mut out_words = sha256_compression_function(
+        cs.namespace(|| "compress_0"),
+        &block_bits_0,
+        &h_words,
+    )?;
+
+    for (i, row) in rows.iter().enumerate().skip(1) {
+        let (left, right) = &links[i - 1];
+        enforce_digest_bytes_eq_words(
+            cs.namespace(|| format!("core_link_{}_out", i - 1)),
+            "wire_out",
+            &out_words,
+            left,
+        )?;
+        enforce_digest_bytes_eq_words(
+            cs.namespace(|| format!("core_link_{}_in", i - 1)),
+            "wire_in",
+            &out_words,
+            right,
+        )?;
+
         h_words = out_words;
         let block_bits =
             block_to_allocated_bits(cs.namespace(|| format!("block_{i}")), &row.1)?;

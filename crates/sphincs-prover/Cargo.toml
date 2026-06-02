@@ -39,6 +39,21 @@ path = "tests/fold_packed_chain.rs"
 required-features = ["pqclean"]
 
 [[test]]
+name = "fold_bound_shared"
+path = "tests/fold_bound_shared.rs"
+required-features = ["pqclean"]
+
+[[test]]
+name = "fold_bound_packed_core"
+path = "tests/fold_bound_packed_core.rs"
+required-features = ["pqclean"]
+
+[[test]]
+name = "fold_split_step_core"
+path = "tests/fold_split_step_core.rs"
+required-features = ["pqclean"]
+
+[[test]]
 name = "fold_multi_packed"
 path = "tests/fold_multi_packed.rs"
 required-features = ["pqclean"]

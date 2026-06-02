@@ -132,6 +132,57 @@ flowchart TB
   HT --> EQ
 ```
 
+The diagram above is the **target** logical dependency (core glue reads folded compression endpoints). Spartan2 does **not** insert those arrows automatically; see §2.4.
+
+### 2.4 How Spartan2 combines folding (step) and core (separate R1CS)
+
+NeutronNova in Spartan2 keeps **two constraint systems** and merges them only inside the **zk proof**, not by sharing one `ConstraintSystem` namespace.
+
+| Piece | Circuit type | R1CS shape | What gets satisfied |
+|--------|----------------|------------|---------------------|
+| Step #i | `C_step` ([`FoldStepCircuit`](../crates/sphincs-prover/src/fold.rs)) | `S_step` | One compression: `Compress(h_in, block)` (output implicit) |
+| Core | `C_core` ([`FoldCoreChainCircuit`](../crates/sphincs-prover/src/core.rs), etc.) | `S_core` | Glue you put in core `precommitted` / `synthesize` (e.g. `h_out[i] == h_in[j]` as **witness bytes**) |
+| Fold | NIFS on step instances only | — | `U_fold, W_fold` = accumulated step instances |
+
+**Setup:** synthesize `S_step` from a step prototype, `S_core` from a core prototype, then `SplitR1CSShape::equalize` so both use the same witness **segment sizes** (`num_shared`, `num_precommitted`, `num_rest`). The matrices are still different.
+
+**Prep / prove witness layout** (see `NeutronNovaZkSNARK::prep_prove` / `prove` in Spartan2):
+
+```text
+1. shared_witness(step_circuits[0])  →  W[0 .. num_shared)  +  comm_W_shared
+2. For each step i:  clone shared, run precommitted(step_i)  →  per-instance precommitted slice
+3. core: same shared slice, precommitted(core)  →  core precommitted slice (on S_core)
+4. prove: r1cs_instance_and_witness for every step ∥ core  →  (U_i, W_i), (U_core, W_core)
+5. NIFS: fold {U_i, W_i} only  →  (U_fold, W_fold)
+6. Sum-check: batched over step (folded) and core polynomials (Az, Bz, Cz from each)
+```
+
+```mermaid
+sequenceDiagram
+  participant Steps as N × C_step
+  participant NIFS as NeutronNova NIFS
+  participant Folded as U_fold, W_fold
+  participant Core as C_core
+  participant SC as Batched sum-check
+
+  Steps->>NIFS: step instances U_i, W_i
+  NIFS->>Folded: fold steps only
+  Core->>Core: U_core, W_core (separate witness)
+  Folded->>SC: poly_Az_step, poly_Bz_step, poly_Cz_step
+  Core->>SC: poly_Az_core, poly_Bz_core, poly_Cz_core
+  Note over SC: Single π proves both,<br/>not that W_fold links to W_core<br/>unless shared / explicit glue
+```
+
+**What the repo runs today (split circuits):**
+
+- [`fold_local_chain`](../crates/sphincs-prover/tests/fold_local_chain.rs): `N` × [`FoldStepCircuit`] + [`FoldCoreChainCircuit`] with trace link bytes in the core. Folding constraints and core constraints appear together in **one verified proof**, but core link equalities use **their own** allocated bytes, not the compression output wires from step instances (`shared()` is empty). A malicious prover could satisfy each side with inconsistent digests.
+- **Intended fix:** allocate chain link digests in [`SpartanCircuit::shared`] so step `precommitted` pins `h_out` / `h_in` to `shared[k]` and core `precommitted` checks `shared[k]` against trace topology ([`FoldStepBoundCircuit`](../crates/sphincs-prover/src/bound.rs)). Spartan2 **0.9.0** currently fails verify when `num_shared > 0` (see ignored `fold_bound_shared`).
+- **Workaround (not split):** [`FoldPackedCoreBoundCircuit`] puts step + boundary glue in one `C_step` instance; the NeutronNova core stays a shape placeholder ([`FoldCoreCircuit`]).
+
+**Mental model:** “Combined with folding” means the **verifier checks one NeutronNova proof** whose sum-check simultaneously attests to the **folded step relation** and the **core relation**. Cryptographic **binding** between them is a separate engineering step (shared witness or future fold IO), not a consequence of using the same `fold_and_prove` API.
+
+**HackMD plan (milestones + open problems):** [HACKMD_NEUTRONNOVA_PLAN.md](HACKMD_NEUTRONNOVA_PLAN.md).
+
 ---
 
 ## 3. ZK proof protocol (signature only)

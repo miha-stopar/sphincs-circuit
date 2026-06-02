@@ -8,7 +8,7 @@ use spartan2::{
     traits::Engine,
 };
 use sphincs_circuit::{sha256_compress, step::StepInput};
-use sphincs_prover::{fold_and_prove, setup_with_proto, verify_proof, FoldCoreCircuit, FoldStepCircuit};
+use sphincs_prover::{fold_and_prove, verify_proof, FoldCoreCircuit, FoldStepCircuit};
 use sphincs_ref::{sign_deterministic, verify_with_trace, CRYPTO_SEEDBYTES};
 
 const NUM_STEPS: usize = 4;
@@ -60,7 +60,8 @@ fn fold_trace_prefix_proves_and_verifies() {
         })
         .collect();
 
-    let (pk_fold, vk) = setup_with_proto(&steps[0], NUM_STEPS);
+    let (pk_fold, vk) =
+        sphincs_prover::setup_with_default_core(&steps[0], NUM_STEPS);
     let core = FoldCoreCircuit::new();
     let proof = fold_and_prove(&pk_fold, &steps, &core);
     verify_proof(&vk, &proof, NUM_STEPS);

@@ -10,15 +10,22 @@ bellpepper = "0.4.0"
 bellpepper-core = "0.4.0"
 ff = "0.13"
 spartan2 = "0.9.0"
+circuit-spec = { path = "../circuit-spec" }
 sphincs-circuit = { path = "../sphincs-circuit" }
 
 [dev-dependencies]
 bincode = "1.3"
+circuit-spec = { path = "../circuit-spec" }
 sphincs-ref = { path = "../sphincs-ref" }
 
 [[test]]
 name = "fold_trace_prefix"
 path = "tests/fold_trace_prefix.rs"
+required-features = ["pqclean"]
+
+[[test]]
+name = "fold_local_chain"
+path = "tests/fold_local_chain.rs"
 required-features = ["pqclean"]
 
 [features]

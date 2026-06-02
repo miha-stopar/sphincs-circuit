@@ -158,8 +158,11 @@ No trusted setup. Groth16 not used.
 
 ### M3 — Folding + prove (3–4 weeks)
 
-- [ ] Wire NeutronNova fold pipeline
-- [ ] Spartan2 proof of full verify on KAT
+- [x] Wire NeutronNova fold pipeline (`sphincs-prover`: step + placeholder core, 4-step smoke test)
+- [x] Local-chain core: `FoldCoreChainCircuit` + `chain::synthesize_sha256_state_equal` (boundary bytes; fold IO TBD)
+- [x] Fold longest local chain prefix (`fold_local_chain` test, default 16 steps)
+- [ ] Bind core link witnesses to folded step `h_out` / `h_in` wires (sound cross-circuit glue)
+- [ ] Spartan2 proof of full verify on KAT (~all trace compressions)
 - [ ] Benchmark: prove time, verify time, proof size vs native verify
 
 ### M4 — Hardening (ongoing)

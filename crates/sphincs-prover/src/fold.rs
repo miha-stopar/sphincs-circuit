@@ -167,30 +167,42 @@ pub type FoldProverKey = spartan2::neutronnova_zk::NeutronNovaProverKey<E>;
 pub type FoldVerifierKey = spartan2::neutronnova_zk::NeutronNovaVerifierKey<E>;
 pub type FoldProof = NeutronNovaZkSNARK<E>;
 
-/// Setup keys for folding `num_steps` uniform compression instances.
+/// Setup keys for folding `num_steps` step instances + one core circuit.
 ///
 /// `step_proto` must use inputs that satisfy the step constraints (NeutronNova
 /// shape generation runs witness synthesis). Pass a real trace row, not zeros.
-pub fn setup_with_proto(step_proto: &FoldStepCircuit, num_steps: usize) -> (FoldProverKey, FoldVerifierKey) {
-    let core_proto = FoldCoreCircuit::new();
-    NeutronNovaZkSNARK::<E>::setup(step_proto, &core_proto, num_steps)
-        .expect("NeutronNova setup")
+/// `core_proto` must match the core used at prove time (constraint shape depends
+/// on it, e.g. [`crate::FoldCoreChainCircuit`] link count).
+pub fn setup_with_proto<C2: SpartanCircuit<E>>(
+    step_proto: &FoldStepCircuit,
+    core_proto: &C2,
+    num_steps: usize,
+) -> (FoldProverKey, FoldVerifierKey) {
+    NeutronNovaZkSNARK::<E>::setup(step_proto, core_proto, num_steps).expect("NeutronNova setup")
+}
+
+/// Setup with the default SHA-256 placeholder core ([`FoldCoreCircuit`]).
+pub fn setup_with_default_core(
+    step_proto: &FoldStepCircuit,
+    num_steps: usize,
+) -> (FoldProverKey, FoldVerifierKey) {
+    setup_with_proto(step_proto, &FoldCoreCircuit::new(), num_steps)
 }
 
 /// Setup with an all-zero prototype (only valid when the step circuit does not
 /// pin `h_out`; see [`sha256_compress::synthesize_compression_for_fold`]).
 pub fn setup(num_steps: usize) -> (FoldProverKey, FoldVerifierKey) {
-    setup_with_proto(
+    setup_with_default_core(
         &FoldStepCircuit::from_row([0u8; 32], [0u8; 64], [0u8; 32]),
         num_steps,
     )
 }
 
 /// Fold `steps` and produce a Spartan2 zk proof.
-pub fn fold_and_prove(
+pub fn fold_and_prove<C2: SpartanCircuit<E>>(
     pk: &FoldProverKey,
     steps: &[FoldStepCircuit],
-    core: &FoldCoreCircuit,
+    core: &C2,
 ) -> FoldProof {
     let prep = NeutronNovaZkSNARK::<E>::prep_prove(pk, steps, core, true).expect("prep_prove");
     let (proof, _prep_back) =

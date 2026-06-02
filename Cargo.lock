@@ -906,6 +906,7 @@ dependencies = [
  "bellpepper",
  "bellpepper-core",
  "bincode",
+ "circuit-spec",
  "ff",
  "spartan2",
  "sphincs-circuit",

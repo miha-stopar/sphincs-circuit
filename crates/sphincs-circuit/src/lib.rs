@@ -5,6 +5,7 @@
 //! **M2:** complete — verify core + trace witness alignment in `witness`.
 //! **Next:** M3 NeutronNova fold + Spartan2 prove.
 
+pub mod chain;
 pub mod fors;
 pub mod hash_msg;
 pub mod hypertree;
@@ -16,6 +17,7 @@ pub mod verify;
 pub mod witness;
 pub mod wots;
 
+pub use chain::synthesize_sha256_state_equal;
 pub use fors::{
     fors_pk_from_sig_bits, message_to_indices, synthesize_fors_pk_from_sig, SPX_FORS_BYTES,
     SPX_FORS_MSG_BYTES, SPX_FORS_TREES,

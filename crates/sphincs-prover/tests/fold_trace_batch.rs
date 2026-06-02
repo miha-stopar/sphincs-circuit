@@ -49,6 +49,16 @@ fn fold_first_8_trace_compressions() {
 }
 
 #[test]
+#[ignore = "64-step fold is slow; run with --release --ignored"]
+fn fold_first_64_trace_compressions() {
+    let seed = [0x79u8; CRYPTO_SEEDBYTES];
+    let msg = b"fold trace batch 64";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    fold_n(&rows_spec(&trace), 64);
+}
+
+#[test]
 #[ignore = "32-step fold is slow; run with --release --ignored"]
 fn fold_first_32_trace_compressions() {
     let seed = [0x78u8; CRYPTO_SEEDBYTES];

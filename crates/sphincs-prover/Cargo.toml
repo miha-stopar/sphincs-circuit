@@ -8,10 +8,15 @@ license.workspace = true
 [dependencies]
 bellpepper = "0.4.0"
 bellpepper-core = "0.4.0"
+bincode = "1.3"
 ff = "0.13"
 spartan2 = "0.9.0"
 circuit-spec = { path = "../circuit-spec" }
 sphincs-circuit = { path = "../sphincs-circuit" }
+
+[dependencies.sphincs-ref]
+path = "../sphincs-ref"
+optional = true
 
 [dev-dependencies]
 bincode = "1.3"
@@ -43,6 +48,11 @@ name = "fold_trace_batch"
 path = "tests/fold_trace_batch.rs"
 required-features = ["pqclean"]
 
+[[bin]]
+name = "fold-bench"
+path = "src/bin/fold_bench.rs"
+required-features = ["pqclean"]
+
 [features]
 default = []
-pqclean = ["sphincs-ref/pqclean"]
+pqclean = ["dep:sphincs-ref", "sphincs-ref/pqclean"]

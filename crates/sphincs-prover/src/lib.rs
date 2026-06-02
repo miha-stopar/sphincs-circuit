@@ -27,8 +27,8 @@ mod trace;
 
 pub use core::{FoldCoreChainCircuit, FoldCoreCircuit};
 pub use fold::{
-    fold_and_prove, setup, setup_with_default_core, setup_with_proto, verify_proof, FoldProof,
-    FoldProverKey, FoldStepCircuit, FoldVerifierKey,
+    fold_and_prove, fold_prove_verify_timed, setup, setup_with_default_core, setup_with_proto,
+    verify_proof, FoldProof, FoldProverKey, FoldStepCircuit, FoldVerifierKey, ProveTimings,
 };
 pub use packed::FoldPackedChainCircuit;
 pub use trace::{

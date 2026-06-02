@@ -165,7 +165,8 @@ No trusted setup. Groth16 not used.
 - [ ] Bind core link witnesses to per-instance folded step wires (multi-instance glue)
 - [x] Fold prefix of full trace (`fold_trace_batch`: 8 steps CI, 32 ignored)
 - [ ] Spartan2 proof of full verify on KAT (~all trace compressions)
-- [ ] Benchmark: prove time, verify time, proof size vs native verify
+- [x] Bench harness: `cargo run -p sphincs-prover --features pqclean --release --bin fold-bench -- N`
+- [ ] Benchmark: full trace prove/verify vs native verify
 
 ### M4 — Hardening (ongoing)
 

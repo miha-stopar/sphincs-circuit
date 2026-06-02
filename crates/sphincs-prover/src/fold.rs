@@ -220,3 +220,46 @@ where
 pub fn verify_proof(vk: &FoldVerifierKey, proof: &FoldProof, num_steps: usize) {
     proof.verify(vk, num_steps).expect("verify");
 }
+
+/// Wall-clock phases for benchmarking (milliseconds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProveTimings {
+    pub prep_ms: u64,
+    pub prove_ms: u64,
+    pub verify_ms: u64,
+}
+
+/// Like [`fold_and_prove`], but record prep / prove / verify duration.
+pub fn fold_prove_verify_timed<S, C2>(
+    pk: &FoldProverKey,
+    vk: &FoldVerifierKey,
+    steps: &[S],
+    core: &C2,
+) -> (FoldProof, ProveTimings)
+where
+    S: SpartanCircuit<E>,
+    C2: SpartanCircuit<E>,
+{
+    let num_steps = steps.len();
+    let prep_start = std::time::Instant::now();
+    let prep = NeutronNovaZkSNARK::<E>::prep_prove(pk, steps, core, true).expect("prep_prove");
+    let prep_ms = prep_start.elapsed().as_millis() as u64;
+
+    let prove_start = std::time::Instant::now();
+    let (proof, _prep_back) =
+        NeutronNovaZkSNARK::<E>::prove(pk, steps, core, prep, true).expect("prove");
+    let prove_ms = prove_start.elapsed().as_millis() as u64;
+
+    let verify_start = std::time::Instant::now();
+    proof.verify(vk, num_steps).expect("verify");
+    let verify_ms = verify_start.elapsed().as_millis() as u64;
+
+    (
+        proof,
+        ProveTimings {
+            prep_ms,
+            prove_ms,
+            verify_ms,
+        },
+    )
+}

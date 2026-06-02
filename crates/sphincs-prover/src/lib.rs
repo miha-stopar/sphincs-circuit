@@ -32,6 +32,7 @@ pub use fold::{
 };
 pub use packed::FoldPackedChainCircuit;
 pub use trace::{
-    chain_boundary_links, fold_steps_from_rows, longest_chain_packed, longest_chain_prefix,
-    longest_local_chain, packed_chains_from_trace,
+    chain_boundary_links, fold_steps_from_rows, fold_steps_prefix, longest_chain_packed,
+    longest_chain_prefix, longest_local_chain, packed_chains_from_trace,
+    pad_steps_to_power_of_two,
 };

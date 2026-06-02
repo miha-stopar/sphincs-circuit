@@ -38,6 +38,11 @@ name = "fold_multi_packed"
 path = "tests/fold_multi_packed.rs"
 required-features = ["pqclean"]
 
+[[test]]
+name = "fold_trace_batch"
+path = "tests/fold_trace_batch.rs"
+required-features = ["pqclean"]
+
 [features]
 default = []
 pqclean = ["sphincs-ref/pqclean"]

@@ -6,6 +6,22 @@ use sphincs_circuit::witness::{local_chain_segments, step_input_from_row, LocalC
 use crate::fold::FoldStepCircuit;
 use crate::packed::FoldPackedChainCircuit;
 
+/// First `n` compressions in trace order (global index, not necessarily a local chain).
+pub fn fold_steps_prefix(rows: &[Sha256Compression], n: usize) -> Vec<FoldStepCircuit> {
+    rows.iter().take(n).map(|row| FoldStepCircuit::new(step_input_from_row(row))).collect()
+}
+
+/// NeutronNova pads instance count to a power of two; duplicate the last step to pad.
+pub fn pad_steps_to_power_of_two(mut steps: Vec<FoldStepCircuit>) -> Vec<FoldStepCircuit> {
+    if steps.is_empty() {
+        return steps;
+    }
+    while !steps.len().is_power_of_two() {
+        steps.push(steps.last().expect("non-empty").clone());
+    }
+    steps
+}
+
 /// Build step circuits from compression rows (same order as trace).
 pub fn fold_steps_from_rows(rows: &[Sha256Compression]) -> Vec<FoldStepCircuit> {
     rows.iter()

@@ -163,6 +163,7 @@ No trusted setup. Groth16 not used.
 - [x] Fold longest local chain prefix (`fold_local_chain` test, default 16 steps)
 - [x] Sound local-chain wiring in one step (`FoldPackedChainCircuit<N>`, wire `h_out[i]→h_in[i+1]`)
 - [ ] Bind core link witnesses to per-instance folded step wires (multi-instance glue)
+- [x] Fold prefix of full trace (`fold_trace_batch`: 8 steps CI, 32 ignored)
 - [ ] Spartan2 proof of full verify on KAT (~all trace compressions)
 - [ ] Benchmark: prove time, verify time, proof size vs native verify
 

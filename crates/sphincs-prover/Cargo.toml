@@ -28,6 +28,11 @@ name = "fold_local_chain"
 path = "tests/fold_local_chain.rs"
 required-features = ["pqclean"]
 
+[[test]]
+name = "fold_packed_chain"
+path = "tests/fold_packed_chain.rs"
+required-features = ["pqclean"]
+
 [features]
 default = []
 pqclean = ["sphincs-ref/pqclean"]

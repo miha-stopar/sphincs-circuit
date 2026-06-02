@@ -17,7 +17,8 @@ pub mod verify;
 pub mod witness;
 pub mod wots;
 
-pub use chain::synthesize_sha256_state_equal;
+pub use chain::{enforce_sha256_words_equal, synthesize_sha256_state_equal};
+pub use sha256_compress::synthesize_compression_chain_for_fold;
 pub use fors::{
     fors_pk_from_sig_bits, message_to_indices, synthesize_fors_pk_from_sig, SPX_FORS_BYTES,
     SPX_FORS_MSG_BYTES, SPX_FORS_TREES,

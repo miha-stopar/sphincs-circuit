@@ -175,6 +175,51 @@ where
     Ok(())
 }
 
+/// Like [`synthesize_compression_for_fold`], but wire `h_out[i] == h_in[i+1]` between rows.
+///
+/// Row `i+1` uses the compression output wires of row `i` as `h_in` (sound in-circuit chain).
+/// `rows` must have length ≥ 2. Each tuple is `(h_in, block, h_out)`.
+pub fn synthesize_compression_chain_for_fold<Scalar, CS>(
+    mut cs: CS,
+    rows: &[([u8; 32], [u8; 64], [u8; 32])],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    use crate::chain::enforce_sha256_words_equal;
+
+    assert!(rows.len() >= 2);
+
+    let block_bits_0 = block_to_allocated_bits(cs.namespace(|| "block_0"), &rows[0].1)?;
+    let mut h_words = words_from_state_bytes(cs.namespace(|| "h_in_0"), "h_in_0", &rows[0].0)?;
+    let mut out_words = sha256_compression_function(
+        cs.namespace(|| "compress_0"),
+        &block_bits_0,
+        &h_words,
+    )?;
+
+    for (i, row) in rows.iter().enumerate().skip(1) {
+        h_words = out_words;
+        let block_bits =
+            block_to_allocated_bits(cs.namespace(|| format!("block_{i}")), &row.1)?;
+        out_words = sha256_compression_function(
+            cs.namespace(|| format!("compress_{i}")),
+            &block_bits,
+            &h_words,
+        )?;
+    }
+
+    let expected = words_from_state_bytes(
+        cs.namespace(|| "h_out_last"),
+        "h_out_last",
+        &rows[rows.len() - 1].2,
+    )?;
+    enforce_sha256_words_equal(cs.namespace(|| "last_out_eq"), &out_words, &expected)?;
+
+    Ok(())
+}
+
 /// Like [`synthesize_compression`], but allocate the 512 block bits as witnesses.
 ///
 /// Uses allocated expected `h_out` words (for oracle tests on T256). Not compatible

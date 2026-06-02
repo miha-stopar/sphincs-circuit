@@ -10,6 +10,32 @@ use bellpepper_core::{ConstraintSystem, SynthesisError};
 
 use crate::sha256_compress::state_bytes_to_words;
 
+/// Constrain two allocated SHA state word vectors (8 `u32` limbs) to be equal.
+pub fn enforce_sha256_words_equal<Scalar, CS>(
+    mut cs: CS,
+    left: &[UInt32],
+    right: &[UInt32],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(left.len(), 8);
+    assert_eq!(right.len(), 8);
+    for (i, (l, r)) in left.iter().zip(right.iter()).enumerate() {
+        for (j, (a, b)) in l
+            .clone()
+            .into_bits_be()
+            .iter()
+            .zip(r.clone().into_bits_be().iter())
+            .enumerate()
+        {
+            Boolean::enforce_equal(cs.namespace(|| format!("w_eq_{i}_{j}")), a, b)?;
+        }
+    }
+    Ok(())
+}
+
 /// Constrain two 32-byte SHA states (8 big-endian `u32` words) to be equal.
 ///
 /// Both sides are allocated witnesses (NeutronNova-safe). Used for local-chain

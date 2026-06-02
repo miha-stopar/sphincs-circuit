@@ -161,7 +161,8 @@ No trusted setup. Groth16 not used.
 - [x] Wire NeutronNova fold pipeline (`sphincs-prover`: step + placeholder core, 4-step smoke test)
 - [x] Local-chain core: `FoldCoreChainCircuit` + `chain::synthesize_sha256_state_equal` (boundary bytes; fold IO TBD)
 - [x] Fold longest local chain prefix (`fold_local_chain` test, default 16 steps)
-- [ ] Bind core link witnesses to folded step `h_out` / `h_in` wires (sound cross-circuit glue)
+- [x] Sound local-chain wiring in one step (`FoldPackedChainCircuit<N>`, wire `h_out[i]→h_in[i+1]`)
+- [ ] Bind core link witnesses to per-instance folded step wires (multi-instance glue)
 - [ ] Spartan2 proof of full verify on KAT (~all trace compressions)
 - [ ] Benchmark: prove time, verify time, proof size vs native verify
 

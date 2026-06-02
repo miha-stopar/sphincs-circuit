@@ -23,6 +23,18 @@ impl StepCircuit {
         sha256_compress::synthesize_compression(cs, &input.h_in, &input.block, &input.h_out)
     }
 
+    /// `N` compressions with in-circuit `h_out[i] → h_in[i+1]` wiring (M3 packed step).
+    pub fn synthesize_chain<Scalar, CS>(cs: CS, rows: &[StepInput]) -> Result<(), SynthesisError>
+    where
+        Scalar: ff::PrimeField,
+        CS: ConstraintSystem<Scalar>,
+    {
+        let triples: Vec<_> = rows
+            .iter()
+            .map(|r| (r.h_in, r.block, r.h_out))
+            .collect();
+        sha256_compress::synthesize_compression_chain_for_fold(cs, &triples)
+    }
 }
 
 #[cfg(test)]
@@ -75,6 +87,42 @@ mod tests {
         // bellpepper SHA-256 compression is ~25k constraints (see bellpepper sha256 tests).
         assert!(step_constraints > 15_000, "got {step_constraints}");
         assert!(step_constraints < 35_000, "got {step_constraints}");
+    }
+
+    fn first_local_chain_range(
+        comps: &[sphincs_ref::Sha256Compression],
+        min_len: usize,
+    ) -> Option<(usize, usize)> {
+        let mut i = 0usize;
+        while i + 1 < comps.len() {
+            let start = i;
+            while i + 1 < comps.len() && comps[i].h_out == comps[i + 1].h_in {
+                i += 1;
+            }
+            let len = i - start + 1;
+            if len >= min_len {
+                return Some((start, i));
+            }
+            i += 1;
+        }
+        None
+    }
+
+    #[test]
+    fn chain_satisfied_for_trace_local_prefix() {
+        let seed = [0xau8; CRYPTO_SEEDBYTES];
+        let msg = b"step chain wiring";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+        let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+        let (start, end) = first_local_chain_range(&trace.compressions, 4).expect("local chain");
+        let rows: Vec<StepInput> = trace.compressions[start..=end]
+            .iter()
+            .map(step_from_row)
+            .collect();
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        StepCircuit::synthesize_chain(&mut cs, &rows).expect("synth");
+        assert!(cs.is_satisfied(), "{:?}", cs.which_is_unsatisfied());
     }
 
     #[test]

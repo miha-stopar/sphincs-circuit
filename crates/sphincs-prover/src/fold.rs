@@ -40,6 +40,10 @@ impl FoldStepCircuit {
     pub fn from_row(h_in: [u8; 32], block: [u8; 64], h_out: [u8; 32]) -> Self {
         Self::new(StepInput { h_in, block, h_out })
     }
+
+    pub fn input(&self) -> &StepInput {
+        &self.input
+    }
 }
 
 impl SpartanCircuit<E> for FoldStepCircuit {
@@ -173,11 +177,11 @@ pub type FoldProof = NeutronNovaZkSNARK<E>;
 /// shape generation runs witness synthesis). Pass a real trace row, not zeros.
 /// `core_proto` must match the core used at prove time (constraint shape depends
 /// on it, e.g. [`crate::FoldCoreChainCircuit`] link count).
-pub fn setup_with_proto<C2: SpartanCircuit<E>>(
-    step_proto: &FoldStepCircuit,
-    core_proto: &C2,
-    num_steps: usize,
-) -> (FoldProverKey, FoldVerifierKey) {
+pub fn setup_with_proto<S, C2>(step_proto: &S, core_proto: &C2, num_steps: usize) -> (FoldProverKey, FoldVerifierKey)
+where
+    S: SpartanCircuit<E>,
+    C2: SpartanCircuit<E>,
+{
     NeutronNovaZkSNARK::<E>::setup(step_proto, core_proto, num_steps).expect("NeutronNova setup")
 }
 
@@ -199,11 +203,11 @@ pub fn setup(num_steps: usize) -> (FoldProverKey, FoldVerifierKey) {
 }
 
 /// Fold `steps` and produce a Spartan2 zk proof.
-pub fn fold_and_prove<C2: SpartanCircuit<E>>(
-    pk: &FoldProverKey,
-    steps: &[FoldStepCircuit],
-    core: &C2,
-) -> FoldProof {
+pub fn fold_and_prove<S, C2>(pk: &FoldProverKey, steps: &[S], core: &C2) -> FoldProof
+where
+    S: SpartanCircuit<E>,
+    C2: SpartanCircuit<E>,
+{
     let prep = NeutronNovaZkSNARK::<E>::prep_prove(pk, steps, core, true).expect("prep_prove");
     let (proof, _prep_back) =
         NeutronNovaZkSNARK::<E>::prove(pk, steps, core, prep, true).expect("prove");

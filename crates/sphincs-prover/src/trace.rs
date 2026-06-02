@@ -4,6 +4,7 @@ use circuit_spec::Sha256Compression;
 use sphincs_circuit::witness::{local_chain_segments, step_input_from_row, LocalChain};
 
 use crate::fold::FoldStepCircuit;
+use crate::packed::FoldPackedChainCircuit;
 
 /// Build step circuits from compression rows (same order as trace).
 pub fn fold_steps_from_rows(rows: &[Sha256Compression]) -> Vec<FoldStepCircuit> {
@@ -53,4 +54,26 @@ pub fn longest_chain_prefix(
     let steps = fold_steps_from_rows(step_rows);
     let links = chain_boundary_links(rows, &sub);
     Some((sub, steps, links))
+}
+
+/// Longest local chain prefix as one [`FoldPackedChainCircuit`] (exactly `N` rows).
+pub fn longest_chain_packed<const N: usize>(
+    rows: &[Sha256Compression],
+) -> Option<(LocalChain, FoldPackedChainCircuit<N>)> {
+    let chain = longest_local_chain(rows)?;
+    if chain.len < N {
+        return None;
+    }
+    let end = chain.start + N - 1;
+    let sub = LocalChain {
+        start: chain.start,
+        end,
+        len: N,
+    };
+    let step_rows: Vec<_> = rows[sub.start..=sub.end]
+        .iter()
+        .map(step_input_from_row)
+        .collect();
+    let packed = FoldPackedChainCircuit::from_slice(&step_rows)?;
+    Some((sub, packed))
 }

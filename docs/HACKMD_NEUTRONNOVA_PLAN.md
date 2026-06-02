@@ -5,8 +5,8 @@ description: HackMD-ready roadmap for PQClean SPHINCS+ verify via NeutronNova fo
 
 # SPHINCS+ Spartan2 — ZK verify plan & open problems
 
-> **Repo:** [github.com/miha-stopar/sphincs-circuit](https://github.com/miha-stopar/sphincs-circuit) · branch [`master`](https://github.com/miha-stopar/sphincs-circuit/tree/master) · commit [`f70a485`](https://github.com/miha-stopar/sphincs-circuit/commit/f70a485)  
-> **This note:** [`docs/HACKMD_NEUTRONNOVA_PLAN.md`](https://github.com/miha-stopar/sphincs-circuit/blob/f70a485/docs/HACKMD_NEUTRONNOVA_PLAN.md)
+> **Repo:** [github.com/miha-stopar/sphincs-circuit](https://github.com/miha-stopar/sphincs-circuit) · branch [`master`](https://github.com/miha-stopar/sphincs-circuit/tree/master)  
+> **This note (source):** [`docs/HACKMD_NEUTRONNOVA_PLAN.md`](https://github.com/miha-stopar/sphincs-circuit/blob/master/docs/HACKMD_NEUTRONNOVA_PLAN.md)
 
 ---
 
@@ -347,4 +347,4 @@ Document precisely what π proves **today** (two relations, one proof) vs **targ
 
 ---
 
-*Last updated: 2026-05-29 — commit [`f70a485`](https://github.com/miha-stopar/sphincs-circuit/commit/f70a485) on [`master`](https://github.com/miha-stopar/sphincs-circuit/tree/master).*
+*Last updated: 2026-05-29 — published from [`master`](https://github.com/miha-stopar/sphincs-circuit/tree/master) (includes commit `531513e` and earlier M3 binding work).*

@@ -77,3 +77,21 @@ pub fn longest_chain_packed<const N: usize>(
     let packed = FoldPackedChainCircuit::from_slice(&step_rows)?;
     Some((sub, packed))
 }
+
+/// One [`FoldPackedChainCircuit`] per local chain segment with `len >= N`.
+pub fn packed_chains_from_trace<const N: usize>(
+    rows: &[Sha256Compression],
+) -> Vec<(LocalChain, FoldPackedChainCircuit<N>)> {
+    local_chain_segments(rows)
+        .into_iter()
+        .filter(|c| c.len >= N)
+        .filter_map(|chain| {
+            let inputs: Vec<_> = rows[chain.start..=chain.end]
+                .iter()
+                .map(step_input_from_row)
+                .collect();
+            let packed = FoldPackedChainCircuit::from_slice(&inputs)?;
+            Some((chain, packed))
+        })
+        .collect()
+}

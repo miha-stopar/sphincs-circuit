@@ -2,6 +2,8 @@
 //!
 //! Follows the Spartan2 [`sha256_neutronnova`](https://github.com/microsoft/Spartan2/blob/main/benches/sha256_neutronnova.rs)
 //! pattern: `N` step instances + one core circuit → `NeutronNovaZkSNARK`.
+//!
+//! **Shared witness:** not used (`shared()` returns `[]` for step and core). See crate-root docs.
 
 use std::marker::PhantomData;
 

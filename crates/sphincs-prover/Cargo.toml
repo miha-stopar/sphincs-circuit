@@ -33,6 +33,11 @@ name = "fold_packed_chain"
 path = "tests/fold_packed_chain.rs"
 required-features = ["pqclean"]
 
+[[test]]
+name = "fold_multi_packed"
+path = "tests/fold_multi_packed.rs"
+required-features = ["pqclean"]
+
 [features]
 default = []
 pqclean = ["sphincs-ref/pqclean"]

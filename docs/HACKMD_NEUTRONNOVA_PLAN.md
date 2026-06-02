@@ -76,51 +76,96 @@ Parameter set: **SPHINCS+-SHA2-128s-simple** (PQClean `sphincs-sha2-128s-simple`
 
 ---
 
-## 3. Mental model: step + core in one proof (not one circuit)
+## 3. Two circuits, one proof — what “combined” means
 
-NeutronNova produces **one** zero-knowledge proof π. The verifier accepts π iff **two separate R1CS relations** hold:
+SPHINCS+ verify in this repo is split into two **different** R1CS circuits on purpose:
 
-1. **Folded step relation** — `N` instances of `C_step` (each: one compression), accumulated by NIFS into `(U_fold, W_fold)`.
-2. **Core relation** — one instance of `C_core` (glue: local chain equalities today; full verify logic later).
-
-**“Combined with folding”** means the **sum-check inside π is batched** over polynomials from **both** the folded step accumulator and the core instance. Spartan2 computes `Az, Bz, Cz` for the folded step witness and, in parallel, for the core witness, then runs outer/inner sum-checks on the **joint** claims.
-
-**It does not mean** that digests allocated in `C_core` are automatically the same wires as compression outputs in `C_step`. Calling `fold_and_prove(steps, core)` only places both relations in the **same proof transcript**. **Cryptographic binding** between them is a **separate engineering step**:
-
-| Mechanism | Split `C_step` + `C_core`? | Status |
+| Circuit | Role | Folded? |
 | --- | --- | --- |
-| **Shared witness** (`SpartanCircuit::shared`) | Yes (target) | Blocked on Spartan2 0.9.0 (`num_shared > 0` → verify fail) |
-| **Fold IO / accumulator → core** | Yes (if API exists) | Not wired |
-| **Glue inside one `C_step`** (packed chain) | No (core is placeholder) | **Works** (sound local chain only) |
+| **`C_step`** (`FoldStepCircuit`) | One SHA-256 compression: `(h_in, block) → h_out` | Yes — `N` instances are merged by NeutronNova (NIFS) into one accumulated instance `(U_fold, W_fold)` |
+| **`C_core`** (`FoldCoreChainCircuit`, later full verify glue) | Everything that is *not* a raw compression: chain topology, FORS, WOTS+, hypertree, `root == PK.root`, … | No — a **single** instance `(U_core, W_core)` |
+
+They are **not** one big bellpepper gadget. Step and core have different constraint matrices (`S_step` vs `S_core`). You still get **one** proof π at the end because Spartan2 runs a **batched sum-check** that simultaneously shows:
+
+- the **folded step** relation is satisfiable, and  
+- the **core** relation is satisfiable.
+
+Think of it like proving “document A is valid” and “document B is valid” in one zk bundle: the verifier checks both, but text in A is not automatically the same variables as text in B unless you **explicitly equate** them.
+
+### What we still need: binding (same digest, same variable)
+
+For a sound SPHINCS+ proof we need constraints of the form:
+
+```text
+∀i:  h_out,i = Compress(h_in,i, block_i)              ← C_step (many instances, then fold)
+∀ link:  h_out,i = h_in,j   using the SAME assignment  ← must match C_step outputs, not a second copy
+```
+
+The hard part is the second line **across** circuits. Today’s smoke path (`fold_local_chain`) puts `h_out[i] == h_in[i+1]` in **`C_core` only**, by allocating **fresh** 32-byte witnesses from the PQClean trace. The compressions in **`C_step`** use **different** wires. An honest prover fills both from the trace; a **malicious** prover could pick digest A in the step circuit and digest B in the core circuit and still pass π if each relation is satisfiable on its own.
+
+**Binding** means: choose a design where “link digest between step *i* and *i*+1” is **one** witness slot that both `C_step` and `C_core` constraints read — not two copies that the prover could mismatch.
+
+### Three ways to bind step outputs to core (candidate solutions)
+
+These are the main engineering options; only the third is fully working on Spartan2 0.9.0 today.
+
+#### Option A — Shared witness (Spartan2 `SpartanCircuit::shared`)
+
+**Idea:** Allocate link digests once in the **shared** segment of the witness vector `W` (indices `0 .. num_shared-1`). Every step instance and the core circuit use the **same** `comm_W_shared` and the same field values in that prefix.
+
+- In **`C_step` `precommitted`:** after `Compress(...)`, constrain compression output words to equal `shared[k]` (outgoing link) and/or incoming `h_in` to `shared[k-1]`.
+- In **`C_core` `precommitted`:** constrain `shared[k]` to equal trace topology bytes (or to FORS/WOTS inputs derived from them).
+
+**Pros:** Keeps the intended NeutronNova split (bulk SHA in fold, glue in core).  
+**Cons (current bug):** As soon as `num_shared > 0`, our proofs fail verify (`InvalidSumcheckProof` or PCS length errors). Implemented in `FoldStepBoundCircuit` / `FoldCoreBoundCircuit`; test `fold_bound_shared` is **`#[ignore]`**. Microsoft’s `sha256_neutronnova` bench uses `shared() → []` only.
+
+#### Option B — Fold accumulator as core inputs (“fold IO”)
+
+**Idea:** NeutronNova folding does not throw away step witnesses — it produces an accumulated instance **`(U_fold, W_fold)`** whose witness encodes (in a folded form) all step instances. **Fold IO** means: expose selected entries of `W_fold` (or challenges derived from the fold) as **public or private inputs** to `C_core`, and write core constraints that refer to those values — e.g. “core link *k* equals folded witness word *w*”.
+
+**Pros:** Core stays separate; binding is explicit in the proof algebra.  
+**Cons:** Not implemented in our crate; unclear how much of `W_fold` is addressable from `SpartanCircuit::synthesize` in Spartan2 0.9.0 (needs API audit — open problem P3).
+
+**Intuition:** Shared witness ties circuits **before** fold via one committed prefix; fold IO ties core **after** fold to the accumulated step blob. Both aim at the same goal: core must not use independent copies of digests.
+
+#### Option C — Put glue inside one `C_step` (packed chain)
+
+**Idea:** Avoid cross-circuit binding entirely for local chains: implement several compressions **in one** step instance with **wire** `h_out[i] → h_in[i+1]`, plus optional boundary checks against trace bytes in the **same** `ConstraintSystem` (`FoldPackedChainCircuit`, `FoldPackedCoreBoundCircuit`).
+
+**Pros:** **Sound** for that segment today; NeutronNova verify passes.  
+**Cons:** The separate **`C_core`** is only a **placeholder** (dummy SHA block for shape padding, like Spartan’s benchmark). Real SPHINCS+ glue (FORS, hypertree, …) still has to land somewhere — either move into a future fat core with Option A/B, or repeat packed segments.
+
+| Option | Step + core split? | Binds step wires to glue? | Works on Spartan2 0.9.0? |
+| --- | --- | --- | --- |
+| **A** Shared witness | Yes | Yes (target) | **No** (verify bug) |
+| **B** Fold IO → core | Yes | Yes (if API allows) | Not tried |
+| **C** Packed in `C_step` | No (core dummy) | Yes (in one circuit) | **Yes** (local chain) |
 
 ```mermaid
 flowchart TB
-  subgraph prove["Single NeutronNova proof π"]
-    FOLD["NIFS: steps only → U_fold, W_fold"]
-    CORE["U_core, W_core"]
-    SC["sum-check: step polys + core polys"]
+  subgraph prove["One NeutronNova proof π"]
+    FOLD["NIFS: C_step × N → U_fold, W_fold"]
+    CORE["C_core: U_core, W_core"]
+    SC["Batched sum-check"]
     FOLD --> SC
     CORE --> SC
   end
 
-  subgraph bind["Binding — NOT automatic"]
-    SH["shared W + comm_W_shared"]
-    IO["folded witness → core inputs"]
-    PACK["all glue in C_step"]
+  subgraph bind["Binding step ↔ core (pick one)"]
+    A["A: shared W prefix"]
+    B["B: W_fold → core inputs"]
+    C["C: all glue in C_step"]
   end
 
-  bind -.-> prove
+  bind -.->|"not automatic from fold_and_prove"| prove
 ```
 
-**Soundness target (cross-circuit):**
+**Demo — split circuits without binding (Option none):**
 
-```text
-∀i:  H_out,i = Compress(H_in,i, block_i)           [folded C_step]
-∀ link:  H_out,i = H_in,j  (same R1CS vars)       [C_core ↔ step]
-… hash_message, FORS, WOTS+, hypertree, root …     [C_core]
+```bash
+cargo test -p sphincs-prover --features pqclean \
+  --test fold_split_step_core -- --nocapture
 ```
-
-**Today (split smoke path):** the first line uses **step wires**; chain equalities in `FoldCoreChainCircuit` use **separate allocated bytes** copied from the PQClean trace. A malicious prover could satisfy each side with inconsistent digests while still passing π.
 
 ---
 
@@ -154,15 +199,6 @@ sequenceDiagram
 
 Wrapper: `crates/sphincs-prover/src/fold.rs` → `spartan2::neutronnova_zk::NeutronNovaZkSNARK`.
 
-**Demo — split circuits (no wire binding):**
-
-```bash
-cargo test -p sphincs-prover --features pqclean \
-  --test fold_split_step_core -- --nocapture
-```
-
----
-
 ## 5. What exists in the repo today
 
 ### M2 — Core gadgets (mostly done)
@@ -179,6 +215,21 @@ Bit-accurate SHA-256 compression step, `thash`, `compute_root`, WOTS+, FORS, hyp
 | `FoldStepBoundCircuit` + shared witness | ⚠️ implemented; `fold_bound_shared` **ignored** (Spartan2 verify) |
 | Full trace / KAT prove | ⬜ |
 | `fold-bench` scaling | ✅ |
+
+### Known bugs and unsound paths (do not confuse with “done”)
+
+| Issue | Symptom / risk | Where |
+| --- | --- | --- |
+| **Split core without binding** | `FoldCoreChainCircuit` checks trace **bytes**; `FoldStepCircuit` checks compressions on **other** wires. Malicious prover can mismatch digests and still verify π. | `fold_local_chain` — intentional smoke only |
+| **Shared witness verify failure** | `num_shared > 0` → `InvalidSumcheckProof` or `rerandomize_commitment: length mismatch` | `FoldStepBoundCircuit`, `fold_bound_shared` (**`#[ignore]`**) |
+| **`h_out` pinning on step** | Explicit `h_out = Compress(...)` in fold step breaks NeutronNova verify | `synthesize_compression` vs `synthesize_compression_for_fold` — pinning avoided on purpose |
+| **Placeholder core** | `FoldCoreCircuit` is ~1 SHA block for shape equalization only; proves nothing about SPHINCS+ | Used in `fold_packed_chain`, bench |
+| **NeutronNova batch size** | Instance count padded to power of two; duplicating the last step can break **bound** chains | `pad_steps_to_power_of_two`, `longest_chain_bound` |
+| **Single step instance** | `num_steps = 1` has caused prover panics in past tests | Use ≥ 2 instances (see packed chain test) |
+| **Full verify gadget in prover** | `synthesize_verify_core` exists in `sphincs-circuit` but is **not** wired as production `C_core` yet | M2 done, M3 glue open |
+| **Oracle / intermediate_roots** | Past bug: wrong `tree` / `idx_leaf` in test oracle (fixed in tree); worth regression-testing | `verify.rs` tests |
+
+**Honest status of “we have a zk fold” today:** we can prove π for real PQClean compression rows **and** a separate core, but π does **not** yet imply a full sound SPHINCS+ verify unless you use the **packed** path for the chain fragment or fix **Option A/B**.
 
 ### Prover artifacts (quick map)
 
@@ -226,21 +277,21 @@ cargo run -p sphincs-prover --features pqclean --release \
 | **3** Full trace + KAT | ⬜ | ~2k–3k compressions, PQClean KAT ZK verify |
 | **4** Hardening | ⬜ | Public IO, perf, optional length-hiding / robust params |
 
-### Phase 1 detail (binding strategies)
+### Phase 1 detail (binding — see §3 Options A/B/C)
 
-| Approach | Split step/core? | Sound chain across instances? |
+| Option | Implementation | Sound chain across instances? |
 | --- | --- | --- |
-| **A.** `FoldPackedChainCircuit` | Core placeholder | ✅ per packed segment |
-| **B.** Shared link digests | ✅ | ✅ if Spartan2 shared works |
-| **C.** `FoldCoreChainCircuit` + plain step | ✅ | ❌ duplicate witness bytes (smoke only) |
+| **C** Packed | `FoldPackedChainCircuit` / `FoldPackedCoreBoundCircuit` | ✅ per packed segment |
+| **A** Shared | `FoldStepBoundCircuit` + `FoldCoreBoundCircuit` | ✅ if Spartan2 shared works |
+| **None** Split smoke | `FoldCoreChainCircuit` + plain `FoldStepCircuit` | ❌ duplicate witness bytes |
 
-**Next:** unblock **B** (P1); scale **A** for long traces; keep **C** as API documentation only.
+**Next:** unblock **Option A** (P1); scale **Option C** for long traces; treat split smoke as demo only.
 
 ### Phase 2 detail
 
 - Only **compressions** stay in folded `C_step`.
 - **Indices, FORS, WOTS+, hypertree, root** live in `C_core`.
-- Logical arrow “folded compressions → chain glue” must become **shared vars** or fold IO—not a second copy of digests in core.
+- Logical arrow “folded compressions → chain glue” must become **Option A or B** (§3)—not a second copy of digests in core.
 
 ---
 
@@ -250,7 +301,7 @@ Grouped by impact on a production ZK verify proof.
 
 ---
 
-### P1 — Shared witness + NeutronNova verify (**blocks split binding**)
+### P1 — Shared witness + NeutronNova verify (**blocks Option A in §3**)
 
 **Symptom:** `num_shared > 0` → `InvalidSumcheckProof` or `rerandomize_commitment: commitment and blinds must have the same length`.
 
@@ -277,13 +328,14 @@ Grouped by impact on a production ZK verify proof.
 
 ---
 
-### P3 — Fold IO / accumulator → core inputs
+### P3 — Fold IO / accumulator → core inputs (Option B in §3)
 
-**Question:** Can `C_core` consume folded witness words as public IO or challenges?
+**Question:** After NIFS, can `C_core` constrain its link variables to equal selected words of `W_fold` (the folded step witness), instead of independent trace bytes?
 
 **Tasks**
 
-- [ ] Search Spartan2 for `folded_W` / `folded_U` APIs usable from `SpartanCircuit::synthesize`.
+- [ ] Search Spartan2 for `folded_W` / `folded_U` exposure into `SpartanCircuit::synthesize` or public IO.
+- [ ] Prototype: core link constraint references folded index, not `alloc` from trace only.
 
 ---
 
@@ -323,20 +375,7 @@ Document precisely what π proves **today** (two relations, one proof) vs **targ
 
 ---
 
-## 9. Decision log (v1)
-
-| Topic | Choice |
-| --- | --- |
-| Statement | PQClean `crypto_sign_verify` for 128s-simple |
-| Step circuit | One SHA-256 compression per instance |
-| Proof system | Spartan2 + NeutronNova + Hyrax |
-| ZK | Variant A — `σ` private |
-| Message | Padded 4096 B, public `mlen` |
-| Hash in circuit | SHA-256 (not Poseidon) |
-
----
-
-## 10. References
+## 9. References
 
 | Resource | URL |
 | --- | --- |
@@ -347,4 +386,4 @@ Document precisely what π proves **today** (two relations, one proof) vs **targ
 
 ---
 
-*Last updated: 2026-05-29 — published from [`master`](https://github.com/miha-stopar/sphincs-circuit/tree/master) (includes commit `531513e` and earlier M3 binding work).*
+*Last updated: 2026-05-29 — published from [`master`](https://github.com/miha-stopar/sphincs-circuit/tree/master).*

@@ -70,10 +70,13 @@ Each level runs: `setup` → `prep_prove` → `prove` → `verify` on **4 step i
 | **L3** | 1 | alloc only, no precommitted refs | **OK** |
 | **L4a** | 24 | scalar eq, 3 digest links | **OK** |
 | **L4** | 24 | `enforce_bytes_eq_shared` (core glue) | **OK** (after `enforce_num_eq_u32` fix) |
-| **L4b** | 24 | `FoldStepBoundCircuit` chain + core alloc-only | isolates step-side shared pins |
-| **L5** | 24 | `FoldStepBoundCircuit` + `FoldCoreBoundCircuit` (consistent chain) | full split binding |
+| **L4b** | 24 | `FoldStepBoundCircuit` chain + core alloc-only | **FAIL** — full step chain |
+| **L4b-in** | 24 | step 1: `u32_words_from_shared` only | **OK** — IN-from-shared works |
+| **L4b-single** | 24 | step 0: `enforce_words_eq_shared` only | **FAIL** — OUT-pin fails |
+| **L4b-out-1link** | 8 | step 0 out-pin, one digest | **FAIL** — not a width issue |
+| **L5** | 24 | step + core (consistent chain) | full split binding |
 
-**L4 vs L4a** isolated the old `enforce_num_eq_u32` bug (LE vs BE bit zip). **L4b** isolates step-side shared pins without core glue.
+**L4 vs L4a** fixed the old `enforce_num_eq_u32` bug. **L4b splits** show verify fails on **`enforce_words_eq_shared`** (compression output → shared), not on `u32_words_from_shared` (shared → compression input).
 
 ---
 
@@ -126,20 +129,35 @@ Failure is in the **relaxed Spartan** leg of verify (after NIFS on the verifier 
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│ L0–L3, L4a          Shared witness OK (scalar / alloc-only) │
-│ L4, L5, fold_bound  FAIL — bit-decomposition shared glue    │
-│ fold_split_step_core verify OK, NO wire binding             │
-│ fold_bound_packed_core verify OK, glue inside C_step        │
+│ L0–L3, L4a, L4, L4b-in   verify OK                          │
+│ L4b-single/out, L4b, L5  FAIL — enforce_words_eq_shared     │
+│ fold_bound_shared        same (out-pin to shared)           │
+│ fold_bound_packed_core   verify OK, glue inside C_step      │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
+## L4b sub-ladder (step-side splits)
+
+```bash
+cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4b -- --nocapture
+```
+
+| Test | What it isolates | verify |
+|------|------------------|--------|
+| `ladder_4b_in_step1_shared_h_in_only` | `u32_words_from_shared` on step 1 | **OK** |
+| `ladder_4b_single_step0_out_pin_only` | `enforce_words_eq_shared` on step 0 only | **FAIL** |
+| `ladder_4b_out_one_link_step0_only` | out-pin with 8 shared (one link) | **FAIL** |
+| `ladder_4b_step_shared_pin_chain_core_alloc_only` | full in+out chain | **FAIL** |
+
+Folded steps must share the same `precommitted` gadget path; mixing replica SHA on some instances causes `Precommitted variables are not allocated correctly`.
+
 ## Next steps
 
-1. Fix `enforce_num_eq_u32` / shared↔`UInt32` wiring so prover and verifier R1CS layouts match under NeutronNova (or use scalar equality if sound for T256 limb range).
-2. Minimal upstream repro for [Spartan2](https://github.com/Microsoft/Spartan2): L4 vs L4a pair.
-3. Re-run `fold_bound_shared` (remove `#[ignore]`) after fix.
+1. Investigate why `enforce_words_eq_shared` (computed compression `UInt32` → shared) fails under fold while `enforce_bytes_eq_shared` (constants → shared) passes.
+2. Minimal Spartan2 upstream repro: L4b-in (pass) vs L4b-single (fail).
+3. Re-run `fold_bound_shared` after fix.
 4. Until then, use `FoldPackedCoreBoundCircuit` for sound local-chain demos.
 
 ---

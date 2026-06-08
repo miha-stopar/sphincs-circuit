@@ -22,8 +22,12 @@ use spartan2::{
 };
 use bellpepper_core::test_cs::TestConstraintSystem;
 use sphincs_circuit::{
-    alloc_digest_shared, enforce_bytes_eq_shared, link_shared_slice,
-    sha256_compress::synthesize_compression_for_fold_with_out, DIGEST_WORDS,
+    alloc_digest_shared, enforce_bytes_eq_shared, enforce_words_eq_shared, link_shared_slice,
+    sha256_compress::{
+        state_bytes_to_words, synthesize_compression_for_fold_h_words,
+        synthesize_compression_for_fold_with_out,
+    },
+    u32_words_from_shared, DIGEST_WORDS,
 };
 use sphincs_circuit::step::StepInput;
 use sphincs_prover::{bound_steps_from_inputs, FoldCoreBoundCircuit};
@@ -541,6 +545,178 @@ fn build_consistent_bound_batch(
     (inputs, digests)
 }
 
+/// L4b-single: only `step_index == 0` pins `h_out → shared[0]`; other steps ignore shared.
+#[derive(Clone, Debug)]
+struct BoundStyleStepPinOutSingle {
+    step_index: usize,
+    input: StepInput,
+    link_digests: Vec<[u8; 32]>,
+    _p: PhantomData<Scalar>,
+}
+
+impl BoundStyleStepPinOutSingle {
+    fn new(step_index: usize, input: StepInput, link_digests: Vec<[u8; 32]>) -> Self {
+        Self {
+            step_index,
+            input,
+            link_digests,
+            _p: PhantomData,
+        }
+    }
+}
+
+impl SpartanCircuit<E> for BoundStyleStepPinOutSingle {
+    fn public_values(&self) -> Result<Vec<Scalar>, SynthesisError> {
+        Ok(vec![Scalar::ZERO])
+    }
+    fn shared<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        alloc_all_digests(cs, "step_shared", &self.link_digests)
+    }
+    fn precommitted<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+        shared: &[AllocatedNum<Scalar>],
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        // Same fold compression gadget on every instance (required for precommitted equalize).
+        let h_words = state_bytes_to_words(&self.input.h_in)
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let out_words = synthesize_compression_for_fold_h_words(
+            cs.namespace(|| "compress"),
+            &h_words,
+            &self.input.block,
+        )?;
+        if self.step_index == 0 {
+            enforce_words_eq_shared(
+                cs.namespace(|| "link_out_0"),
+                "h_out",
+                &out_words,
+                link_shared_slice(shared, 0),
+            )?;
+        }
+        let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Scalar::ZERO))?;
+        x.inputize(cs.namespace(|| "inputize x"))?;
+        Ok(vec![])
+    }
+    fn num_challenges(&self) -> usize {
+        0
+    }
+    fn synthesize<CS: ConstraintSystem<Scalar>>(
+        &self,
+        _: &mut CS,
+        _: &[AllocatedNum<Scalar>],
+        _: &[AllocatedNum<Scalar>],
+        _: Option<&[Scalar]>,
+    ) -> Result<(), SynthesisError> {
+        Ok(())
+    }
+}
+
+/// L4b-in: only `step_index == 1` reads `shared[0]` as `h_in`; no out-pins on any step.
+#[derive(Clone, Debug)]
+struct BoundStyleStepSharedInOnly {
+    step_index: usize,
+    input: StepInput,
+    link_digests: Vec<[u8; 32]>,
+    _p: PhantomData<Scalar>,
+}
+
+impl BoundStyleStepSharedInOnly {
+    fn new(step_index: usize, input: StepInput, link_digests: Vec<[u8; 32]>) -> Self {
+        Self {
+            step_index,
+            input,
+            link_digests,
+            _p: PhantomData,
+        }
+    }
+}
+
+impl SpartanCircuit<E> for BoundStyleStepSharedInOnly {
+    fn public_values(&self) -> Result<Vec<Scalar>, SynthesisError> {
+        Ok(vec![Scalar::ZERO])
+    }
+    fn shared<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        alloc_all_digests(cs, "step_shared", &self.link_digests)
+    }
+    fn precommitted<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+        shared: &[AllocatedNum<Scalar>],
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        let h_words = if self.step_index == 1 {
+            u32_words_from_shared(
+                cs.namespace(|| "h_in_from_shared"),
+                "h_in",
+                link_shared_slice(shared, 0),
+            )?
+        } else {
+            state_bytes_to_words(&self.input.h_in)
+                .iter()
+                .enumerate()
+                .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)))
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let _out = synthesize_compression_for_fold_h_words(
+            cs.namespace(|| "compress"),
+            &h_words,
+            &self.input.block,
+        )?;
+        let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Scalar::ZERO))?;
+        x.inputize(cs.namespace(|| "inputize x"))?;
+        Ok(vec![])
+    }
+    fn num_challenges(&self) -> usize {
+        0
+    }
+    fn synthesize<CS: ConstraintSystem<Scalar>>(
+        &self,
+        _: &mut CS,
+        _: &[AllocatedNum<Scalar>],
+        _: &[AllocatedNum<Scalar>],
+        _: Option<&[Scalar]>,
+    ) -> Result<(), SynthesisError> {
+        Ok(())
+    }
+}
+
+fn bound_style_steps_pin_out_single(
+    inputs: &[StepInput],
+    digests: Vec<[u8; 32]>,
+) -> Vec<BoundStyleStepPinOutSingle> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| BoundStyleStepPinOutSingle::new(i, input.clone(), digests.clone()))
+        .collect()
+}
+
+fn bound_style_steps_shared_in_only(
+    inputs: &[StepInput],
+    digests: Vec<[u8; 32]>,
+) -> Vec<BoundStyleStepSharedInOnly> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| BoundStyleStepSharedInOnly::new(i, input.clone(), digests.clone()))
+        .collect()
+}
+
+fn core_alloc_only(digests: Vec<[u8; 32]>) -> CoreSharedAllocOnly {
+    CoreSharedAllocOnly {
+        link_digests: digests,
+        _p: PhantomData,
+    }
+}
+
 /// Core: same `shared()` layout as bound steps, but **no** glue constraints (SHA padding only).
 #[derive(Clone, Debug)]
 struct CoreSharedAllocOnly {
@@ -881,6 +1057,56 @@ fn ladder_4b_step_shared_pin_chain_core_alloc_only() {
     eprintln!("L4b result: {r:?}");
 }
 
+/// Only step 0 pins `h_out → shared[0]` (`enforce_words_eq_shared`); steps 1–3 ignore shared.
+#[test]
+fn ladder_4b_single_step0_out_pin_only() {
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let steps = bound_style_steps_pin_out_single(&inputs, digests.clone());
+    let core = core_alloc_only(digests);
+    let r = run_neutronnova(
+        "L4b-single step0 out-pin only",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+    eprintln!("L4b-single result: {r:?}");
+}
+
+/// Only step 1 reads `shared[0]` as `h_in` (`u32_words_from_shared`); no out-pins.
+#[test]
+fn ladder_4b_in_step1_shared_h_in_only() {
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let steps = bound_style_steps_shared_in_only(&inputs, digests.clone());
+    let core = core_alloc_only(digests);
+    let r = run_neutronnova(
+        "L4b-in step1 shared h_in only",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+    eprintln!("L4b-in result: {r:?}");
+    assert!(r.verify_ok, "shared h_in on step 1 should verify: {r:?}");
+}
+
+/// One link (8 shared), step 0 out-pin only — minimal `enforce_words_eq_shared` under fold.
+#[test]
+fn ladder_4b_out_one_link_step0_only() {
+    let (inputs, _) = build_consistent_bound_batch(NUM_STEPS);
+    let digests = vec![inputs[0].h_out];
+    let steps = bound_style_steps_pin_out_single(&inputs, digests.clone());
+    let core = core_alloc_only(digests);
+    let r = run_neutronnova(
+        "L4b-out one link step0",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+    eprintln!("L4b-out-one-link result: {r:?}");
+}
+
 /// Three digest links (24 shared scalars) + `enforce_bytes_eq_shared` core — mirrors `FoldCoreBoundCircuit`.
 #[test]
 fn ladder_4_bound_style_core_bit_decomposition() {
@@ -1053,11 +1279,27 @@ fn ladder_summary_all_phases() {
     let (inputs5, digests5) = build_consistent_bound_batch(NUM_STEPS);
     let l4b = {
         let steps = bound_steps_from_inputs(&inputs5, NUM_STEPS, digests5.clone());
-        let core = CoreSharedAllocOnly {
-            link_digests: digests5.clone(),
-            _p: PhantomData,
-        };
+        let core = core_alloc_only(digests5.clone());
         run_neutronnova("L4b", &steps[0], &core, &steps, &core)
+    };
+
+    let l4b_single = {
+        let steps = bound_style_steps_pin_out_single(&inputs5, digests5.clone());
+        let core = core_alloc_only(digests5.clone());
+        run_neutronnova("L4b-single", &steps[0], &core, &steps, &core)
+    };
+
+    let l4b_in = {
+        let steps = bound_style_steps_shared_in_only(&inputs5, digests5.clone());
+        let core = core_alloc_only(digests5.clone());
+        run_neutronnova("L4b-in", &steps[0], &core, &steps, &core)
+    };
+
+    let l4b_out_1 = {
+        let digests1 = vec![inputs5[0].h_out];
+        let steps = bound_style_steps_pin_out_single(&inputs5, digests1.clone());
+        let core = core_alloc_only(digests1);
+        run_neutronnova("L4b-out-1link", &steps[0], &core, &steps, &core)
     };
 
     let l5 = {
@@ -1067,8 +1309,11 @@ fn ladder_summary_all_phases() {
     };
 
     eprintln!("L4a scalar 24:       verify_ok = {}", l4a.verify_ok);
-    eprintln!("L4b step chain:      verify_ok = {} err = {:?}", l4b.verify_ok, l4b.verify_err);
     eprintln!("L4 bound core:       verify_ok = {} err = {:?}", l4.verify_ok, l4.verify_err);
+    eprintln!("L4b step chain:      verify_ok = {} err = {:?}", l4b.verify_ok, l4b.verify_err);
+    eprintln!("L4b-single out pin:  verify_ok = {} err = {:?}", l4b_single.verify_ok, l4b_single.verify_err);
+    eprintln!("L4b-in shared h_in:  verify_ok = {} err = {:?}", l4b_in.verify_ok, l4b_in.verify_err);
+    eprintln!("L4b-out 1 link:     verify_ok = {} err = {:?}", l4b_out_1.verify_ok, l4b_out_1.verify_err);
     eprintln!("L5 prod bound:       verify_ok = {} err = {:?}", l5.verify_ok, l5.verify_err);
 
     assert!(l0.verify_ok, "L0 baseline must pass");

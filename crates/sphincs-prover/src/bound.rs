@@ -12,9 +12,9 @@
 //! Uses Spartan2 **shared witness** slots (`8 × (num_steps − 1)` field elements) so step
 //! compressions and core trace checks reference the same variables. This is the intended
 //! split-circuit design from [`docs/FOLDING.md`](../../docs/FOLDING.md) §2.3, but NeutronNova
-//! Core glue (`enforce_bytes_eq_shared`) is fixed (see `neutronnova_shared_debug` L4). Step-side
-//! shared pin chain (`FoldStepBoundCircuit` / L4b) still fails NeutronNova verify on Spartan2
-//! **0.9.0** — ignored test `fold_bound_shared_links`.
+//! Core glue (`enforce_bytes_eq_shared`) verifies (L4). `u32_words_from_shared` verifies (L4b-in).
+//! `enforce_words_eq_shared` (compression out → shared) fails verify (L4b-single) — ignored test
+//! `fold_bound_shared_links`.
 
 use std::marker::PhantomData;
 

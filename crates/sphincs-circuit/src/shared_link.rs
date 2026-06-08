@@ -5,12 +5,8 @@
 //! re-checks those slots against trace-supplied boundary bytes.
 
 use bellpepper::gadgets::uint32::UInt32;
-use bellpepper_core::{
-    boolean::Boolean,
-    num::AllocatedNum,
-    ConstraintSystem, SynthesisError,
-};
-use ff::{PrimeField, PrimeFieldBits};
+use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
+use ff::PrimeField;
 
 use crate::sha256_compress::state_bytes_to_words;
 
@@ -57,7 +53,7 @@ pub fn enforce_words_eq_shared<Scalar, CS>(
     shared_limbs: &[AllocatedNum<Scalar>],
 ) -> Result<(), SynthesisError>
 where
-    Scalar: PrimeField + PrimeFieldBits,
+    Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
     assert_eq!(words.len(), DIGEST_WORDS);
@@ -76,7 +72,7 @@ pub fn enforce_bytes_eq_shared<Scalar, CS>(
     shared_limbs: &[AllocatedNum<Scalar>],
 ) -> Result<(), SynthesisError>
 where
-    Scalar: PrimeField + PrimeFieldBits,
+    Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
     let words = state_bytes_to_words(bytes);
@@ -87,21 +83,36 @@ where
     Ok(())
 }
 
+/// `shared` scalar equals the numeric value of `word` (32-bit, LE bit packing).
+///
+/// Reconstruct `sum_j word.bits[j] * 2^j` and enforce it equals `num`. This avoids
+/// decomposing the full field element and matches `UInt32`'s internal LE bit order.
 fn enforce_num_eq_u32<Scalar, CS>(
     mut cs: CS,
     num: &AllocatedNum<Scalar>,
     word: &UInt32,
 ) -> Result<(), SynthesisError>
 where
-    Scalar: PrimeField + PrimeFieldBits,
+    Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    let num_bits = num.to_bits_le(cs.namespace(|| "num_bits"))?;
-    let word_bits = word.clone().into_bits_be();
+    let word_bits = word.clone().into_bits();
     assert_eq!(word_bits.len(), 32);
-    for (j, (a, b)) in num_bits.iter().take(32).zip(word_bits.iter()).enumerate() {
-        Boolean::enforce_equal(cs.namespace(|| format!("bit_{j}")), a, b)?;
-    }
+
+    cs.enforce(
+        || "num_eq_u32",
+        |lc| {
+            let mut acc = lc + num.get_variable();
+            let mut coeff = Scalar::ONE;
+            for bit in word_bits.iter() {
+                acc = acc - &bit.lc(CS::one(), coeff);
+                coeff = coeff.double();
+            }
+            acc
+        },
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
     Ok(())
 }
 
@@ -112,7 +123,7 @@ pub fn u32_words_from_shared<Scalar, CS>(
     shared_limbs: &[AllocatedNum<Scalar>],
 ) -> Result<Vec<UInt32>, SynthesisError>
 where
-    Scalar: PrimeField + PrimeFieldBits,
+    Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
     assert_eq!(shared_limbs.len(), DIGEST_WORDS);
@@ -135,4 +146,52 @@ fn u32_from_scalar<Scalar: PrimeField>(s: Scalar) -> u32 {
     let repr = s.to_repr();
     let bytes = repr.as_ref();
     u32::from_le_bytes(bytes[0..4].try_into().expect("u32 limb"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bellpepper_core::test_cs::TestConstraintSystem;
+    #[test]
+    fn enforce_bytes_eq_shared_is_satisfied_on_allocated_digest() {
+        type Scalar = blstrs::Scalar;
+        let digest = {
+            let mut d = [0u8; 32];
+            d[0] = 0x6a;
+            d[1] = 0x09;
+            d[4] = 0xe6; // non-trivial limb 1
+            d
+        };
+        let mut cs = TestConstraintSystem::<Scalar>::new();
+        let shared = alloc_digest_shared(&mut cs, "s", digest).unwrap();
+        enforce_bytes_eq_shared(&mut cs, "core", &digest, &shared).unwrap();
+        assert!(
+            cs.is_satisfied(),
+            "bytes glue unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
+    }
+
+    #[test]
+    fn enforce_words_eq_shared_is_satisfied_on_allocated_digest() {
+        type Scalar = blstrs::Scalar;
+        let digest = {
+            let mut d = [0u8; 32];
+            d[0] = 0x40;
+            d[31] = 2;
+            d
+        };
+        let words: Vec<UInt32> = state_bytes_to_words(&digest)
+            .iter()
+            .map(|&w| UInt32::constant(w))
+            .collect();
+        let mut cs = TestConstraintSystem::<Scalar>::new();
+        let shared = alloc_digest_shared(&mut cs, "s", digest).unwrap();
+        enforce_words_eq_shared(&mut cs, "step", &words, &shared).unwrap();
+        assert!(
+            cs.is_satisfied(),
+            "words glue unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
+    }
 }

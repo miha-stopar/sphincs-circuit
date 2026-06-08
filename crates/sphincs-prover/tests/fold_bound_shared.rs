@@ -27,9 +27,9 @@ fn max_bound_steps() -> usize {
         .unwrap_or(4)
 }
 
-/// Spartan2 0.9.0 NeutronNova currently fails once `num_shared > 0` (see `bound` module docs).
+/// Spartan2 0.9.0 NeutronNova verify fails on step-side shared pin chain (see `docs/SHARED_WITNESS_DEBUG.md` L4b).
 #[test]
-#[ignore = "shared-witness NeutronNova verify fails on Spartan2 0.9.0"]
+#[ignore = "step-side shared pin chain breaks NeutronNova verify on Spartan2 0.9.0"]
 fn fold_bound_shared_links_prove_and_verify() {
     let seed = [0x33u8; CRYPTO_SEEDBYTES];
     let msg = b"sphincs-prover bound shared fold";

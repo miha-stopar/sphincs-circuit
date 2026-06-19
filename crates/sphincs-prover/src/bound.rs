@@ -7,14 +7,22 @@
 //!
 //! Puts boundary glue inside `C_step` because empty `shared()` cannot link to `C_core` wires.
 //!
-//! ## Target (split): [`FoldStepBoundCircuit`] + [`FoldCoreBoundCircuit`]
+//! ## Split design: [`FoldStepBoundCircuit`] + [`FoldCoreBoundCircuit`]
 //!
 //! Uses Spartan2 **shared witness** slots (`8 × (num_steps − 1)` field elements) so step
-//! compressions and core trace checks reference the same variables. This is the intended
-//! split-circuit design from [`docs/FOLDING.md`](../../docs/FOLDING.md) §2.3, but NeutronNova
-//! Core glue (`enforce_bytes_eq_shared`) verifies (L4). `u32_words_from_shared` verifies (L4b-in).
-//! `enforce_words_eq_shared` (compression out → shared) fails verify (L4b-single) — ignored test
-//! `fold_bound_shared_links`.
+//! compressions and core trace checks reference the same variables (see
+//! [`docs/FOLDING.md`](../../docs/FOLDING.md) §2.3).
+//!
+//! NeutronNova folds every step instance against a **single** R1CS shape (the setup prototype
+//! `steps[0]`), so all instances must synthesize identical constraints over identical witness
+//! columns. The earlier per-step pin (`if step_index == k { enforce_words_eq_shared(link k) }`)
+//! produced a different shape per instance, so steps `1..n` were unsatisfiable and verify failed
+//! with `InvalidSumcheckProof` (`docs/SHARED_WITNESS_DEBUG.md` L4b-single).
+//!
+//! [`FoldStepBoundCircuit`] now uses a **uniform** selector binding: a one-hot `pos` vector
+//! (tied to the public `step_index`) picks which shared link each step reads as `h_in` and
+//! writes as `h_out`, keeping the shape identical across instances. Prove and verify both
+//! succeed — test `fold_bound_shared_links_prove_and_verify`.
 
 use std::marker::PhantomData;
 
@@ -23,10 +31,11 @@ use ff::Field;
 use spartan2::traits::{circuit::SpartanCircuit, Engine};
 use bellpepper::gadgets::uint32::UInt32;
 use sphincs_circuit::{
-    alloc_digest_shared, enforce_bytes_eq_shared, enforce_words_eq_shared, link_shared_slice,
+    alloc_digest_shared, enforce_bytes_eq_shared, enforce_cond_link_eq_u32, link_shared_slice,
+    one_hot_select,
     sha256_compress::{state_bytes_to_words, synthesize_compression_for_fold_h_words},
     step::StepInput,
-    u32_words_from_shared, DIGEST_WORDS,
+    DIGEST_WORDS,
 };
 
 use crate::fold::E;
@@ -92,70 +101,127 @@ impl FoldStepBoundCircuit {
         Self::new(input, step_index, num_steps, link_digests)
     }
 
-    fn link_in_index(&self) -> Option<usize> {
-        if self.step_index > 0 {
-            Some(self.step_index - 1)
-        } else {
-            None
-        }
-    }
-
-    fn link_out_index(&self) -> Option<usize> {
-        if self.step_index + 1 < self.num_steps {
-            Some(self.step_index)
-        } else {
-            None
-        }
-    }
-
-    /// Full step↔shared wiring (currently breaks NeutronNova verify on Spartan2 0.9.0).
-    #[allow(dead_code)]
+    /// Uniform step↔shared wiring: identical R1CS shape for every folded instance.
+    ///
+    /// NeutronNova folds all step instances against a **single** R1CS shape (taken from the
+    /// setup prototype `steps[0]`), so every instance must synthesize the exact same constraints
+    /// referencing the exact same witness columns. A circuit that branches on `step_index` (or
+    /// pins to a per-step link slot) produces a different shape per instance, which makes every
+    /// non-prototype instance unsatisfiable and breaks NeutronNova verify.
+    ///
+    /// Instead we keep the structure constant and move the per-step variation into the witness:
+    /// a one-hot `pos` vector (length `num_steps`, tied to the public `step_index`) selects which
+    /// shared link this step reads as `h_in` (link `step_index - 1`) and writes as `h_out`
+    /// (link `step_index`). Boundary steps skip the absent side via the `pos[0]` / `pos[last]`
+    /// gates.
     fn synthesize_precommitted_linked<CS: ConstraintSystem<Scalar>>(
         &self,
         cs: &mut CS,
         shared: &[AllocatedNum<Scalar>],
     ) -> Result<(), SynthesisError> {
-        let h_words = if let Some(ix) = self.link_in_index() {
-            u32_words_from_shared(
-                cs.namespace(|| "h_in_from_shared"),
-                "h_in",
-                link_shared_slice(shared, ix),
-            )?
-        } else {
-            let words = state_bytes_to_words(&self.input.h_in);
-            words
-                .iter()
-                .enumerate()
-                .map(|(i, &w)| {
-                    UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w))
+        let num_steps = self.num_steps;
+        let num_links = num_steps - 1;
+
+        // One-hot position vector: pos[i] = (i == step_index).
+        let pos: Vec<AllocatedNum<Scalar>> = (0..num_steps)
+            .map(|i| {
+                AllocatedNum::alloc(cs.namespace(|| format!("pos_{i}")), || {
+                    Ok(if i == self.step_index {
+                        Scalar::ONE
+                    } else {
+                        Scalar::ZERO
+                    })
                 })
-                .collect::<Result<_, _>>()?
-        };
+            })
+            .collect::<Result<_, _>>()?;
+        for (i, p) in pos.iter().enumerate() {
+            cs.enforce(
+                || format!("pos_bool_{i}"),
+                |lc| lc + p.get_variable(),
+                |lc| lc + CS::one() - p.get_variable(),
+                |lc| lc,
+            );
+        }
+        cs.enforce(
+            || "pos_sum_one",
+            |lc| {
+                let mut lc = lc;
+                for p in &pos {
+                    lc = lc + p.get_variable();
+                }
+                lc
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + CS::one(),
+        );
+
+        // Bind the one-hot to the public `step_index` (soundness: selectors can't be forged).
+        let step_index = AllocatedNum::alloc(cs.namespace(|| "step_index"), || {
+            Ok(Scalar::from(self.step_index as u64))
+        })?;
+        step_index.inputize(cs.namespace(|| "inputize step_index"))?;
+        cs.enforce(
+            || "pos_weighted_index",
+            |lc| {
+                let mut lc = lc;
+                for (i, p) in pos.iter().enumerate() {
+                    lc = lc + (Scalar::from(i as u64), p.get_variable());
+                }
+                lc
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + step_index.get_variable(),
+        );
+
+        // h_in words: free witness, bound to the selected link for non-first steps.
+        let h_in_words: Vec<UInt32> = state_bytes_to_words(&self.input.h_in)
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)))
+            .collect::<Result<_, _>>()?;
 
         let out_words = synthesize_compression_for_fold_h_words(
             cs.namespace(|| "compress"),
-            &h_words,
+            &h_in_words,
             &self.input.block,
         )?;
 
-        if let Some(ix) = self.link_out_index() {
-            enforce_words_eq_shared(
-                cs.namespace(|| "link_out"),
-                "h_out",
-                &out_words,
-                link_shared_slice(shared, ix),
+        // Reading link k ⇒ this is step k+1; writing link k ⇒ this is step k.
+        let in_sel: Vec<AllocatedNum<Scalar>> =
+            (0..num_links).map(|k| pos[k + 1].clone()).collect();
+        let out_sel: Vec<AllocatedNum<Scalar>> = (0..num_links).map(|k| pos[k].clone()).collect();
+
+        for j in 0..DIGEST_WORDS {
+            let vals: Vec<AllocatedNum<Scalar>> = (0..num_links)
+                .map(|k| link_shared_slice(shared, k)[j].clone())
+                .collect();
+
+            let in_link =
+                one_hot_select(cs.namespace(|| format!("in_mux_{j}")), &in_sel, &vals)?;
+            enforce_cond_link_eq_u32(
+                cs.namespace(|| format!("in_bind_{j}")),
+                &pos[0],
+                &in_link,
+                &h_in_words[j],
+            )?;
+
+            let out_link =
+                one_hot_select(cs.namespace(|| format!("out_mux_{j}")), &out_sel, &vals)?;
+            enforce_cond_link_eq_u32(
+                cs.namespace(|| format!("out_bind_{j}")),
+                &pos[num_steps - 1],
+                &out_link,
+                &out_words[j],
             )?;
         }
 
-        let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Scalar::ZERO))?;
-        x.inputize(cs.namespace(|| "inputize x"))?;
         Ok(())
     }
 }
 
 impl SpartanCircuit<E> for FoldStepBoundCircuit {
     fn public_values(&self) -> Result<Vec<Scalar>, SynthesisError> {
-        Ok(vec![Scalar::ZERO])
+        Ok(vec![Scalar::from(self.step_index as u64)])
     }
 
     fn shared<CS: ConstraintSystem<Scalar>>(

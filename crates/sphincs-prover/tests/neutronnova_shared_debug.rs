@@ -22,7 +22,8 @@ use spartan2::{
 };
 use bellpepper_core::test_cs::TestConstraintSystem;
 use sphincs_circuit::{
-    alloc_digest_shared, enforce_bytes_eq_shared, enforce_words_eq_shared, link_shared_slice,
+    alloc_digest_shared, enforce_bytes_eq_shared, enforce_digest_bytes_eq_words,
+    enforce_words_eq_shared, link_shared_slice,
     sha256_compress::{
         state_bytes_to_words, synthesize_compression_for_fold_h_words,
         synthesize_compression_for_fold_with_out,
@@ -545,6 +546,13 @@ fn build_consistent_bound_batch(
     (inputs, digests)
 }
 
+/// NeutronNova padding row: duplicate penultimate step so last instance can mirror its link slot.
+fn pad_last_step_duplicate_prev(inputs: &mut [StepInput]) {
+    let last = inputs.len() - 1;
+    let prev = last.saturating_sub(1);
+    inputs[last] = inputs[prev].clone();
+}
+
 /// L4b-single: only `step_index == 0` pins `h_out → shared[0]`; other steps ignore shared.
 #[derive(Clone, Debug)]
 struct BoundStyleStepPinOutSingle {
@@ -562,6 +570,71 @@ impl BoundStyleStepPinOutSingle {
             link_digests,
             _p: PhantomData,
         }
+    }
+
+    /// Finer precommitted() row map: h_in → compress → (optional) OUT-pin → public x.
+    fn debug_dump_precommitted_milestones(&self) -> Result<(), SynthesisError> {
+        use spartan2::bellpepper::shape_cs::ShapeCS;
+
+        let mut cs = ShapeCS::<E>::new();
+        let shared = self.shared(&mut cs)?;
+        let base = cs.num_constraints();
+
+        let h_words: Vec<UInt32> = state_bytes_to_words(&self.input.h_in)
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)))
+            .collect::<Result<_, _>>()?;
+        let after_h_in = cs.num_constraints();
+
+        let out_words = synthesize_compression_for_fold_h_words(
+            cs.namespace(|| "compress"),
+            &h_words,
+            &self.input.block,
+        )?;
+        let after_compress = cs.num_constraints();
+
+        let after_out_pin = if self.step_index == 0 {
+            enforce_words_eq_shared(
+                cs.namespace(|| "link_out_0"),
+                "h_out",
+                &out_words,
+                link_shared_slice(&shared, 0),
+            )?;
+            cs.num_constraints()
+        } else {
+            after_compress
+        };
+
+        let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Scalar::ZERO))?;
+        x.inputize(cs.namespace(|| "inputize x"))?;
+        let after_x = cs.num_constraints();
+
+        eprintln!(
+            "  precommitted milestones (step_index={}):",
+            self.step_index
+        );
+        eprintln!(
+            "    rows [{base:5}..{after_h_in:5})  count={:5}  h_in UInt32 alloc",
+            after_h_in - base
+        );
+        eprintln!(
+            "    rows [{after_h_in:5}..{after_compress:5})  count={:5}  SHA compress gadget",
+            after_compress - after_h_in
+        );
+        if self.step_index == 0 {
+            eprintln!(
+                "    rows [{after_compress:5}..{after_out_pin:5})  count={:5}  OUT-pin link_out_0 (enforce_words_eq_shared)",
+                after_out_pin - after_compress
+            );
+        } else {
+            eprintln!("    (no OUT-pin — step_index != 0)");
+        }
+        eprintln!(
+            "    rows [{after_out_pin:5}..{after_x:5})  count={:5}  public input x",
+            after_x - after_out_pin
+        );
+        Ok(())
     }
 }
 
@@ -615,6 +688,177 @@ impl SpartanCircuit<E> for BoundStyleStepPinOutSingle {
     ) -> Result<(), SynthesisError> {
         Ok(())
     }
+}
+
+/// How step 0 pins compression output to `shared[0]` (L4c isolation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OutPinMode {
+    /// `enforce_words_eq_shared(computed out_words, shared)` — fails verify today.
+    DirectWords,
+    /// `out_words == bytes` then `enforce_bytes_eq_shared(bytes, shared)` — core-style path.
+    IndirectBytes,
+    /// `out_words == alloc(expected)` then `enforce_words_eq_shared(alloc, shared)`.
+    MirrorAllocWords,
+}
+
+/// Parameterized step for out-pin strategy tests (step 0 only pins when `pin_mode` set).
+#[derive(Clone, Debug)]
+struct BoundStyleStepPinOutMode {
+    step_index: usize,
+    input: StepInput,
+    link_digests: Vec<[u8; 32]>,
+    pin_mode: Option<OutPinMode>,
+    _p: PhantomData<Scalar>,
+}
+
+impl BoundStyleStepPinOutMode {
+    fn new(
+        step_index: usize,
+        input: StepInput,
+        link_digests: Vec<[u8; 32]>,
+        pin_mode: Option<OutPinMode>,
+    ) -> Self {
+        Self {
+            step_index,
+            input,
+            link_digests,
+            pin_mode,
+            _p: PhantomData,
+        }
+    }
+}
+
+impl SpartanCircuit<E> for BoundStyleStepPinOutMode {
+    fn public_values(&self) -> Result<Vec<Scalar>, SynthesisError> {
+        Ok(vec![Scalar::ZERO])
+    }
+    fn shared<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        alloc_all_digests(cs, "step_shared", &self.link_digests)
+    }
+    fn precommitted<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+        shared: &[AllocatedNum<Scalar>],
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        let h_words = state_bytes_to_words(&self.input.h_in)
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)))
+            .collect::<Result<Vec<_>, _>>()?;
+        let out_words = synthesize_compression_for_fold_h_words(
+            cs.namespace(|| "compress"),
+            &h_words,
+            &self.input.block,
+        )?;
+        let h_out = self.input.h_out;
+        // Indirect/mirror: every instance ties `out_words` to `input.h_out` (equalize-safe).
+        if matches!(
+            self.pin_mode,
+            Some(OutPinMode::IndirectBytes) | Some(OutPinMode::MirrorAllocWords)
+        ) {
+            enforce_digest_bytes_eq_words(
+                cs.namespace(|| "h_out_row_eq"),
+                "h_out",
+                &out_words,
+                &h_out,
+            )?;
+        }
+        if let Some(mode) = self.pin_mode {
+            let link_ix = self.step_index.min(self.link_digests.len().saturating_sub(1));
+            match mode {
+                OutPinMode::DirectWords if self.step_index == 0 => {
+                    enforce_words_eq_shared(
+                        cs.namespace(|| "link_out_direct"),
+                        "h_out",
+                        &out_words,
+                        link_shared_slice(shared, 0),
+                    )?;
+                }
+                OutPinMode::IndirectBytes if self.step_index < self.link_digests.len() => {
+                    enforce_bytes_eq_shared(
+                        cs.namespace(|| format!("link_out_bytes_{}", self.step_index)),
+                        "link",
+                        &h_out,
+                        link_shared_slice(shared, self.step_index),
+                    )?;
+                }
+                OutPinMode::IndirectBytes => {
+                    // Padding instance: reuse last link slot + same bytes as row (duplicate step).
+                    let last = self.link_digests.len() - 1;
+                    enforce_bytes_eq_shared(
+                        cs.namespace(|| "link_out_bytes_pad"),
+                        "link",
+                        &h_out,
+                        link_shared_slice(shared, last),
+                    )?;
+                }
+                OutPinMode::DirectWords => {}
+                OutPinMode::MirrorAllocWords => {
+                    let mirror: Vec<UInt32> = state_bytes_to_words(&h_out)
+                        .iter()
+                        .enumerate()
+                        .map(|(i, &w)| {
+                            UInt32::alloc(cs.namespace(|| format!("mirror_w{i}")), Some(w))
+                        })
+                        .collect::<Result<_, _>>()?;
+                    enforce_words_eq_shared(
+                        cs.namespace(|| "link_out_mirror"),
+                        "link",
+                        &mirror,
+                        link_shared_slice(shared, link_ix),
+                    )?;
+                }
+            }
+        }
+        let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Scalar::ZERO))?;
+        x.inputize(cs.namespace(|| "inputize x"))?;
+        Ok(vec![])
+    }
+    fn num_challenges(&self) -> usize {
+        0
+    }
+    fn synthesize<CS: ConstraintSystem<Scalar>>(
+        &self,
+        _: &mut CS,
+        _: &[AllocatedNum<Scalar>],
+        _: &[AllocatedNum<Scalar>],
+        _: Option<&[Scalar]>,
+    ) -> Result<(), SynthesisError> {
+        Ok(())
+    }
+}
+
+fn bound_style_steps_pin_out_mode(
+    inputs: &[StepInput],
+    digests: Vec<[u8; 32]>,
+    pin_mode: OutPinMode,
+) -> Vec<BoundStyleStepPinOutMode> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| {
+            let mode = if i == 0 { Some(pin_mode) } else { None };
+            BoundStyleStepPinOutMode::new(i, input.clone(), digests.clone(), mode)
+        })
+        .collect()
+}
+
+/// Every step instance runs the same out-pin layout (required for Spartan2 precommitted equalize).
+fn bound_style_steps_pin_out_full_layout(
+    inputs: &[StepInput],
+    digests: Vec<[u8; 32]>,
+    pin_mode: OutPinMode,
+) -> Vec<BoundStyleStepPinOutMode> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| {
+            BoundStyleStepPinOutMode::new(i, input.clone(), digests.clone(), Some(pin_mode))
+        })
+        .collect()
 }
 
 /// L4b-in: only `step_index == 1` reads `shared[0]` as `h_in`; no out-pins on any step.
@@ -1073,6 +1317,99 @@ fn ladder_4b_single_step0_out_pin_only() {
     eprintln!("L4b-single result: {r:?}");
 }
 
+/// Dump VC + step R1CS row maps (where row 132 lives vs OUT-pin rows).
+#[test]
+fn ladder_dump_row_map_l4b_single() {
+    use sphincs_circuit::shared_link::DIGEST_WORDS;
+
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let steps = bound_style_steps_pin_out_single(&inputs, digests.clone());
+    let core = core_alloc_only(digests.clone());
+
+    let setup = NeutronNovaZkSNARK::<E>::setup(&steps[0], &core, NUM_STEPS).expect("setup");
+    let (pk, _vk) = setup;
+
+    let (num_cons, num_shared, num_precommitted, num_rest) = pk.debug_step_dims();
+    let num_vars = num_shared + num_precommitted + num_rest;
+    let (num_rounds_b, num_rounds_x, num_rounds_y) = pk.debug_neutronnova_round_params(NUM_STEPS);
+
+    eprintln!("\n╔══════════════════════════════════════════════════════════════════╗");
+    eprintln!("║  TWO SEPARATE R1CS MATRICES (do not mix row indices)            ║");
+    eprintln!("╚══════════════════════════════════════════════════════════════════╝");
+
+    eprintln!("\n=== MATRIX A: STEP R1CS (S_step) — prototype step_index=0 ===");
+    eprintln!(
+        "  num_cons={num_cons}  num_vars={num_vars}  (shared={num_shared} precommitted={num_precommitted} rest={num_rest})"
+    );
+    eprintln!("  witness layout: W[0..{num_shared}) = shared bus (3 links × 8 u32)");
+
+    let _ = spartan2::debug_dump_spartan_circuit_row_sections("  step phases", &steps[0]);
+    eprintln!("  precommitted sub-sections (step 0 prototype):");
+    steps[0]
+        .debug_dump_precommitted_milestones()
+        .expect("milestones");
+    eprintln!("  precommitted sub-sections (step 1 — no OUT-pin in source, same shape):");
+    steps[1]
+        .debug_dump_precommitted_milestones()
+        .expect("milestones");
+
+    let S_reg = pk.debug_step_shape_regular();
+    let out_pin_rows: Vec<usize> = spartan2::debug_rows_touching_columns(&S_reg, 0, DIGEST_WORDS);
+    eprintln!(
+        "\n  OUT-pin rows = constraints touching shared link-0 columns W[0..{DIGEST_WORDS}):"
+    );
+    eprintln!("    row indices: {out_pin_rows:?}  (NOT row 132 — different matrix)");
+    if let Some(&r) = out_pin_rows.first() {
+        spartan2::debug_log_r1cs_row(&S_reg, r, "example OUT-pin row (num_eq_u32 per word)");
+    }
+
+    eprintln!("\n=== MATRIX B: VC R1CS (vc_shape_regular) — NeutronNova verifier ===");
+    eprintln!(
+        "  num_cons={}  (relaxed Spartan runs on this matrix; row 132 is HERE)",
+        pk.debug_vc_num_cons()
+    );
+    let _ = spartan2::debug_dump_vc_row_sections::<E>(num_rounds_b, num_rounds_x, num_rounds_y);
+    spartan2::debug_log_r1cs_row(pk.debug_vc_shape_regular(), 132, "VC row 132 (Horner, not OUT-pin)");
+
+    eprintln!("\n=== prove run (step[1] should fail is_sat — OUT-pin rows in shape, absent in synth) ===");
+    let _ = run_neutronnova(
+        "L4b-single row map",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+}
+
+/// Side-by-side VC row-132 witness dump: L4b-single (fails) vs L4b-in (passes).
+#[test]
+fn ladder_4b_compare_vc_horner_row_single_vs_in() {
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let core = core_alloc_only(digests.clone());
+
+    let steps_single = bound_style_steps_pin_out_single(&inputs, digests.clone());
+    let _ = run_neutronnova(
+        "L4b-single (compare)",
+        &steps_single[0],
+        &core,
+        &steps_single,
+        &core,
+    );
+
+    let steps_in = bound_style_steps_shared_in_only(&inputs, digests);
+    let r_in = run_neutronnova(
+        "L4b-in (compare)",
+        &steps_in[0],
+        &core,
+        &steps_in,
+        &core,
+    );
+    assert!(
+        r_in.verify_ok,
+        "L4b-in baseline should verify in compare test: {r_in:?}"
+    );
+}
+
 /// Only step 1 reads `shared[0]` as `h_in` (`u32_words_from_shared`); no out-pins.
 #[test]
 fn ladder_4b_in_step1_shared_h_in_only() {
@@ -1088,6 +1425,427 @@ fn ladder_4b_in_step1_shared_h_in_only() {
     );
     eprintln!("L4b-in result: {r:?}");
     assert!(r.verify_ok, "shared h_in on step 1 should verify: {r:?}");
+}
+
+/// Out-pin via `enforce_digest_bytes_eq_words` + `enforce_bytes_eq_shared` (no direct gadget→shared).
+/// Equalized layout on all step instances + padded last row (see `pad_last_step_duplicate_prev`).
+#[test]
+fn ladder_4c_out_pin_indirect_bytes() {
+    let (mut inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    pad_last_step_duplicate_prev(&mut inputs);
+    let steps =
+        bound_style_steps_pin_out_full_layout(&inputs, digests.clone(), OutPinMode::IndirectBytes);
+    let core = core_alloc_only(digests);
+    let r = run_neutronnova(
+        "L4c indirect bytes out-pin (full layout)",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+    eprintln!("L4c-indirect result: {r:?}");
+    assert!(r.prep_ok, "equalized indirect layout should prep_prove: {r:?}");
+}
+
+/// Out-pin via allocated `UInt32` mirror (gadget→mirror, mirror→shared).
+#[test]
+fn ladder_4c_out_pin_mirror_alloc_words() {
+    let (mut inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    pad_last_step_duplicate_prev(&mut inputs);
+    let steps = bound_style_steps_pin_out_full_layout(
+        &inputs,
+        digests.clone(),
+        OutPinMode::MirrorAllocWords,
+    );
+    let core = core_alloc_only(digests);
+    let r = run_neutronnova(
+        "L4c mirror alloc out-pin (full layout)",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+    eprintln!("L4c-mirror result: {r:?}");
+    assert!(r.prep_ok, "equalized mirror layout should prep_prove: {r:?}");
+}
+
+/// Step-0-only pin (unequal precommitted) — documents prep_prove failure mode.
+#[test]
+fn ladder_4c_out_pin_indirect_bytes_step0_only() {
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let steps = bound_style_steps_pin_out_mode(&inputs, digests.clone(), OutPinMode::IndirectBytes);
+    let core = core_alloc_only(digests);
+    let r = run_neutronnova(
+        "L4c indirect bytes step0 only (unequal)",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+    eprintln!("L4c-indirect-step0-only result: {r:?}");
+    assert!(!r.prep_ok, "unequal layout should fail prep_prove: {r:?}");
+}
+
+fn u32_from_uint32_bits(word: &UInt32) -> u32 {
+    let mut w = 0u32;
+    for (j, bit) in word.clone().into_bits().iter().enumerate() {
+        if bit.get_value() == Some(true) {
+            w |= 1 << j;
+        }
+    }
+    w
+}
+
+/// Local R1CS: shared + step-0 out-pin (`enforce_words_eq_shared`) must be satisfiable.
+#[test]
+fn local_r1cs_l4b_single_step0_out_pin_satisfied() {
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let input = &inputs[0];
+    let mut cs = TestConstraintSystem::<Scalar>::new();
+    let shared = alloc_all_digests(&mut cs, "shared", &digests).expect("shared");
+    let h_words: Vec<UInt32> = state_bytes_to_words(&input.h_in)
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)).unwrap())
+        .collect();
+    let out_words = synthesize_compression_for_fold_h_words(
+        &mut cs,
+        &h_words,
+        &input.block,
+    )
+    .expect("compress");
+    enforce_words_eq_shared(
+        &mut cs,
+        "link_out_0",
+        &out_words,
+        link_shared_slice(&shared, 0),
+    )
+    .expect("out-pin");
+    assert!(
+        cs.is_satisfied(),
+        "local step0 out-pin: {:?}",
+        cs.which_is_unsatisfied()
+    );
+}
+
+/// Local R1CS: step-1 `u32_words_from_shared` + compress must be satisfiable.
+#[test]
+fn local_r1cs_l4b_in_step1_shared_h_in_satisfied() {
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let input = &inputs[1];
+    let mut cs = TestConstraintSystem::<Scalar>::new();
+    let shared = alloc_all_digests(&mut cs, "shared", &digests).expect("shared");
+    let h_words = u32_words_from_shared(
+        &mut cs,
+        "h_in_from_shared",
+        link_shared_slice(&shared, 0),
+    )
+    .expect("h_in");
+    let _out = synthesize_compression_for_fold_h_words(&mut cs, &h_words, &input.block).expect("compress");
+    assert!(
+        cs.is_satisfied(),
+        "local step1 shared h_in: {:?}",
+        cs.which_is_unsatisfied()
+    );
+}
+
+/// L4d: scalar `aux == shared[i]` with **no** wire to gadget `UInt32` (unsound; isolation only).
+#[derive(Clone, Debug)]
+struct BoundStyleStepPinOutScalarDecoupled {
+    step_index: usize,
+    input: StepInput,
+    link_digests: Vec<[u8; 32]>,
+    /// When true, every step instance pins its link slot (equalized layout).
+    pin_all_links: bool,
+    _p: PhantomData<Scalar>,
+}
+
+impl SpartanCircuit<E> for BoundStyleStepPinOutScalarDecoupled {
+    fn public_values(&self) -> Result<Vec<Scalar>, SynthesisError> {
+        Ok(vec![Scalar::ZERO])
+    }
+    fn shared<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        alloc_all_digests(cs, "step_shared", &self.link_digests)
+    }
+    fn precommitted<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+        shared: &[AllocatedNum<Scalar>],
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        let h_words: Vec<UInt32> = state_bytes_to_words(&self.input.h_in)
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)))
+            .collect::<Result<_, _>>()?;
+        let out_words = synthesize_compression_for_fold_h_words(
+            cs.namespace(|| "compress"),
+            &h_words,
+            &self.input.block,
+        )?;
+        let pin = self.pin_all_links || self.step_index == 0;
+        if pin {
+            let link_ix = if self.pin_all_links {
+                self.step_index
+                    .min(self.link_digests.len().saturating_sub(1))
+            } else {
+                0
+            };
+            for (i, (word, shared_limb)) in out_words
+                .iter()
+                .zip(link_shared_slice(shared, link_ix).iter())
+                .enumerate()
+            {
+                let w = u32_from_uint32_bits(word);
+                let aux = AllocatedNum::alloc(cs.namespace(|| format!("out_aux_{i}")), || {
+                    Ok(Scalar::from(w as u64))
+                })?;
+                enforce_equal(
+                    cs.namespace(|| format!("out_scalar_eq_{i}")),
+                    "eq",
+                    &aux,
+                    shared_limb,
+                )?;
+            }
+        }
+        let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Scalar::ZERO))?;
+        x.inputize(cs.namespace(|| "inputize x"))?;
+        Ok(vec![])
+    }
+    fn num_challenges(&self) -> usize {
+        0
+    }
+    fn synthesize<CS: ConstraintSystem<Scalar>>(
+        &self,
+        _: &mut CS,
+        _: &[AllocatedNum<Scalar>],
+        _: &[AllocatedNum<Scalar>],
+        _: Option<&[Scalar]>,
+    ) -> Result<(), SynthesisError> {
+        Ok(())
+    }
+}
+
+fn bound_style_steps_scalar_decoupled(
+    inputs: &[StepInput],
+    digests: Vec<[u8; 32]>,
+    pin_all_links: bool,
+) -> Vec<BoundStyleStepPinOutScalarDecoupled> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| BoundStyleStepPinOutScalarDecoupled {
+            step_index: i,
+            input: input.clone(),
+            link_digests: digests.clone(),
+            pin_all_links,
+            _p: PhantomData,
+        })
+        .collect()
+}
+
+/// Fold gadget + scalar `aux == shared[i]` for **all** shared limbs (like L4a, not one link).
+#[derive(Clone, Debug)]
+struct BoundStyleStepFoldGadgetAllSharedScalar {
+    input: StepInput,
+    link_digests: Vec<[u8; 32]>,
+    _p: PhantomData<Scalar>,
+}
+
+impl SpartanCircuit<E> for BoundStyleStepFoldGadgetAllSharedScalar {
+    fn public_values(&self) -> Result<Vec<Scalar>, SynthesisError> {
+        Ok(vec![Scalar::ZERO])
+    }
+    fn shared<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        alloc_all_digests(cs, "step_shared", &self.link_digests)
+    }
+    fn precommitted<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+        shared: &[AllocatedNum<Scalar>],
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        let h_words: Vec<UInt32> = state_bytes_to_words(&self.input.h_in)
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)))
+            .collect::<Result<_, _>>()?;
+        let _out = synthesize_compression_for_fold_h_words(
+            cs.namespace(|| "compress"),
+            &h_words,
+            &self.input.block,
+        )?;
+        for (i, s) in shared.iter().enumerate() {
+            let aux = AllocatedNum::alloc(cs.namespace(|| format!("aux_{i}")), || {
+                s.get_value().ok_or(SynthesisError::AssignmentMissing)
+            })?;
+            enforce_equal(cs.namespace(|| format!("eq_{i}")), "eq", &aux, s)?;
+        }
+        let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Scalar::ZERO))?;
+        x.inputize(cs.namespace(|| "inputize x"))?;
+        Ok(vec![])
+    }
+    fn num_challenges(&self) -> usize {
+        0
+    }
+    fn synthesize<CS: ConstraintSystem<Scalar>>(
+        &self,
+        _: &mut CS,
+        _: &[AllocatedNum<Scalar>],
+        _: &[AllocatedNum<Scalar>],
+        _: Option<&[Scalar]>,
+    ) -> Result<(), SynthesisError> {
+        Ok(())
+    }
+}
+
+/// L4e plus step-0 `enforce_words_eq_shared` on compression output (partial out-pin).
+#[derive(Clone, Debug)]
+struct BoundStyleStepAllSharedPlusOutPin {
+    step_index: usize,
+    input: StepInput,
+    link_digests: Vec<[u8; 32]>,
+    _p: PhantomData<Scalar>,
+}
+
+impl SpartanCircuit<E> for BoundStyleStepAllSharedPlusOutPin {
+    fn public_values(&self) -> Result<Vec<Scalar>, SynthesisError> {
+        Ok(vec![Scalar::ZERO])
+    }
+    fn shared<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        alloc_all_digests(cs, "step_shared", &self.link_digests)
+    }
+    fn precommitted<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+        shared: &[AllocatedNum<Scalar>],
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        let h_words: Vec<UInt32> = state_bytes_to_words(&self.input.h_in)
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)))
+            .collect::<Result<_, _>>()?;
+        let out_words = synthesize_compression_for_fold_h_words(
+            cs.namespace(|| "compress"),
+            &h_words,
+            &self.input.block,
+        )?;
+        for (i, s) in shared.iter().enumerate() {
+            let aux = AllocatedNum::alloc(cs.namespace(|| format!("aux_{i}")), || {
+                s.get_value().ok_or(SynthesisError::AssignmentMissing)
+            })?;
+            enforce_equal(cs.namespace(|| format!("eq_{i}")), "eq", &aux, s)?;
+        }
+        if self.step_index == 0 {
+            enforce_words_eq_shared(
+                cs.namespace(|| "link_out_0"),
+                "h_out",
+                &out_words,
+                link_shared_slice(shared, 0),
+            )?;
+        }
+        let x = AllocatedNum::alloc(cs.namespace(|| "x"), || Ok(Scalar::ZERO))?;
+        x.inputize(cs.namespace(|| "inputize x"))?;
+        Ok(vec![])
+    }
+    fn num_challenges(&self) -> usize {
+        0
+    }
+    fn synthesize<CS: ConstraintSystem<Scalar>>(
+        &self,
+        _: &mut CS,
+        _: &[AllocatedNum<Scalar>],
+        _: &[AllocatedNum<Scalar>],
+        _: Option<&[Scalar]>,
+    ) -> Result<(), SynthesisError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn ladder_4f_all_shared_scalar_eq_plus_step0_out_pin() {
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let steps: Vec<_> = inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| BoundStyleStepAllSharedPlusOutPin {
+            step_index: i,
+            input: input.clone(),
+            link_digests: digests.clone(),
+            _p: PhantomData,
+        })
+        .collect();
+    let core = core_alloc_only(digests.clone());
+    let r = run_neutronnova(
+        "L4f all-shared eq + step0 out-pin",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+    eprintln!("L4f result: {r:?}");
+}
+
+#[test]
+fn ladder_4e_fold_gadget_all_shared_scalar_eq() {
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let steps: Vec<_> = inputs
+        .iter()
+        .map(|input| BoundStyleStepFoldGadgetAllSharedScalar {
+            input: input.clone(),
+            link_digests: digests.clone(),
+            _p: PhantomData,
+        })
+        .collect();
+    let core = core_alloc_only(digests.clone());
+    let r = run_neutronnova(
+        "L4e fold gadget + all shared scalar eq",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+    eprintln!("L4e result: {r:?}");
+}
+
+/// Full layout: every step pins one link slot via decoupled scalar (no gadget wire).
+#[test]
+fn ladder_4d_scalar_decoupled_out_pin_full_layout() {
+    let (mut inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    pad_last_step_duplicate_prev(&mut inputs);
+    let steps = bound_style_steps_scalar_decoupled(&inputs, digests.clone(), true);
+    let core = core_alloc_only(digests.clone());
+    let r = run_neutronnova(
+        "L4d scalar decoupled full layout",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+    eprintln!("L4d-full result: {r:?}");
+}
+
+/// Step 0 only: decoupled scalar out-pin (same shape as L4b-single).
+#[test]
+fn ladder_4d_scalar_decoupled_out_pin_step0_only() {
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let steps = bound_style_steps_scalar_decoupled(&inputs, digests.clone(), false);
+    let core = core_alloc_only(digests);
+    let r = run_neutronnova(
+        "L4d scalar decoupled step0 only",
+        &steps[0],
+        &core,
+        &steps,
+        &core,
+    );
+    eprintln!("L4d-step0-only result: {r:?}");
 }
 
 /// One link (8 shared), step 0 out-pin only — minimal `enforce_words_eq_shared` under fold.
@@ -1308,13 +2066,291 @@ fn ladder_summary_all_phases() {
         run_neutronnova("L5", &steps[0], &core, &steps, &core)
     };
 
+    let (mut inputs4c, digests4c) = build_consistent_bound_batch(NUM_STEPS);
+    pad_last_step_duplicate_prev(&mut inputs4c);
+    let l4c_indirect = {
+        let steps = bound_style_steps_pin_out_full_layout(
+            &inputs4c,
+            digests4c.clone(),
+            OutPinMode::IndirectBytes,
+        );
+        let core = core_alloc_only(digests4c.clone());
+        run_neutronnova("L4c-indirect", &steps[0], &core, &steps, &core)
+    };
+    let l4c_mirror = {
+        let steps = bound_style_steps_pin_out_full_layout(
+            &inputs4c,
+            digests4c.clone(),
+            OutPinMode::MirrorAllocWords,
+        );
+        let core = core_alloc_only(digests4c);
+        run_neutronnova("L4c-mirror", &steps[0], &core, &steps, &core)
+    };
+
     eprintln!("L4a scalar 24:       verify_ok = {}", l4a.verify_ok);
     eprintln!("L4 bound core:       verify_ok = {} err = {:?}", l4.verify_ok, l4.verify_err);
     eprintln!("L4b step chain:      verify_ok = {} err = {:?}", l4b.verify_ok, l4b.verify_err);
     eprintln!("L4b-single out pin:  verify_ok = {} err = {:?}", l4b_single.verify_ok, l4b_single.verify_err);
     eprintln!("L4b-in shared h_in:  verify_ok = {} err = {:?}", l4b_in.verify_ok, l4b_in.verify_err);
     eprintln!("L4b-out 1 link:     verify_ok = {} err = {:?}", l4b_out_1.verify_ok, l4b_out_1.verify_err);
+    eprintln!(
+        "L4c indirect bytes: prep_ok = {} verify_ok = {} err = {:?}",
+        l4c_indirect.prep_ok, l4c_indirect.verify_ok, l4c_indirect.verify_err
+    );
+    eprintln!(
+        "L4c mirror alloc:   prep_ok = {} verify_ok = {} err = {:?}",
+        l4c_mirror.prep_ok, l4c_mirror.verify_ok, l4c_mirror.verify_err
+    );
     eprintln!("L5 prod bound:       verify_ok = {} err = {:?}", l5.verify_ok, l5.verify_err);
 
     assert!(l0.verify_ok, "L0 baseline must pass");
+}
+
+// --- L6: uniform selector-based chain binding (the fix) --------------------------------------
+
+/// `result = sum_k sel[k] * vals[k]` (caller guarantees `sel` is one-hot or all-zero).
+fn one_hot_select<CS: ConstraintSystem<Scalar>>(
+    mut cs: CS,
+    sel: &[AllocatedNum<Scalar>],
+    vals: &[AllocatedNum<Scalar>],
+) -> Result<AllocatedNum<Scalar>, SynthesisError> {
+    assert_eq!(sel.len(), vals.len());
+    let mut prods = Vec::with_capacity(sel.len());
+    for (k, (s, v)) in sel.iter().zip(vals.iter()).enumerate() {
+        prods.push(s.mul(cs.namespace(|| format!("prod_{k}")), v)?);
+    }
+    let val: Option<Scalar> = prods
+        .iter()
+        .try_fold(Scalar::ZERO, |acc, p| p.get_value().map(|v| acc + v));
+    let result = AllocatedNum::alloc(cs.namespace(|| "select"), || {
+        val.ok_or(SynthesisError::AssignmentMissing)
+    })?;
+    cs.enforce(
+        || "select_sum",
+        |lc| {
+            let mut lc = lc;
+            for p in &prods {
+                lc = lc + p.get_variable();
+            }
+            lc
+        },
+        |lc| lc + CS::one(),
+        |lc| lc + result.get_variable(),
+    );
+    Ok(result)
+}
+
+/// Enforce `(1 - gate) * (link - value(word)) == 0`.
+///
+/// When `gate == 1` (boundary step) the equality is skipped; otherwise `link` (a shared limb)
+/// must equal the numeric value of `word`.
+fn enforce_cond_link_eq_u32<CS: ConstraintSystem<Scalar>>(
+    mut cs: CS,
+    gate: &AllocatedNum<Scalar>,
+    link: &AllocatedNum<Scalar>,
+    word: &UInt32,
+) -> Result<(), SynthesisError> {
+    let bits = word.clone().into_bits();
+    assert_eq!(bits.len(), 32);
+    cs.enforce(
+        || "cond_link_eq",
+        |lc| lc + CS::one() - gate.get_variable(),
+        |lc| {
+            let mut lc = lc + link.get_variable();
+            let mut coeff = Scalar::ONE;
+            for b in &bits {
+                lc = lc - &b.lc(CS::one(), coeff);
+                coeff = coeff.double();
+            }
+            lc
+        },
+        |lc| lc,
+    );
+    Ok(())
+}
+
+/// Uniform chain-bound step: identical R1CS shape for every instance.
+///
+/// A one-hot `pos` (length `num_steps`, tied to the public `step_index`) selects which shared
+/// link this step reads as `h_in` (link `step_index - 1`) and writes as `h_out` (link
+/// `step_index`). Boundary steps skip the missing side via the `pos[0]` / `pos[last]` gates.
+#[derive(Clone, Debug)]
+struct BoundStyleStepUniform {
+    step_index: usize,
+    num_steps: usize,
+    input: StepInput,
+    link_digests: Vec<[u8; 32]>,
+    _p: PhantomData<Scalar>,
+}
+
+impl SpartanCircuit<E> for BoundStyleStepUniform {
+    fn public_values(&self) -> Result<Vec<Scalar>, SynthesisError> {
+        Ok(vec![Scalar::from(self.step_index as u64)])
+    }
+
+    fn shared<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        alloc_all_digests(cs, "step_shared", &self.link_digests)
+    }
+
+    fn precommitted<CS: ConstraintSystem<Scalar>>(
+        &self,
+        cs: &mut CS,
+        shared: &[AllocatedNum<Scalar>],
+    ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        let num_steps = self.num_steps;
+        let num_links = num_steps - 1;
+
+        // One-hot position vector pos[i] = (i == step_index).
+        let pos: Vec<AllocatedNum<Scalar>> = (0..num_steps)
+            .map(|i| {
+                AllocatedNum::alloc(cs.namespace(|| format!("pos_{i}")), || {
+                    Ok(if i == self.step_index {
+                        Scalar::ONE
+                    } else {
+                        Scalar::ZERO
+                    })
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        for (i, p) in pos.iter().enumerate() {
+            cs.enforce(
+                || format!("pos_bool_{i}"),
+                |lc| lc + p.get_variable(),
+                |lc| lc + CS::one() - p.get_variable(),
+                |lc| lc,
+            );
+        }
+        cs.enforce(
+            || "pos_sum_one",
+            |lc| {
+                let mut lc = lc;
+                for p in &pos {
+                    lc = lc + p.get_variable();
+                }
+                lc
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + CS::one(),
+        );
+
+        // Tie the one-hot to the public step_index for soundness.
+        let si = AllocatedNum::alloc(cs.namespace(|| "step_index"), || {
+            Ok(Scalar::from(self.step_index as u64))
+        })?;
+        si.inputize(cs.namespace(|| "inputize step_index"))?;
+        cs.enforce(
+            || "pos_weighted_index",
+            |lc| {
+                let mut lc = lc;
+                for (i, p) in pos.iter().enumerate() {
+                    lc = lc + (Scalar::from(i as u64), p.get_variable());
+                }
+                lc
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + si.get_variable(),
+        );
+
+        // h_in words (free witness; bound to the selected link for non-first steps).
+        let h_in_words: Vec<UInt32> = state_bytes_to_words(&self.input.h_in)
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)))
+            .collect::<Result<_, _>>()?;
+
+        let out_words = synthesize_compression_for_fold_h_words(
+            cs.namespace(|| "compress"),
+            &h_in_words,
+            &self.input.block,
+        )?;
+
+        // Reading link k means this is step k+1; writing link k means this is step k.
+        let in_sel: Vec<AllocatedNum<Scalar>> = (0..num_links).map(|k| pos[k + 1].clone()).collect();
+        let out_sel: Vec<AllocatedNum<Scalar>> = (0..num_links).map(|k| pos[k].clone()).collect();
+
+        for j in 0..DIGEST_WORDS {
+            let vals: Vec<AllocatedNum<Scalar>> = (0..num_links)
+                .map(|k| shared[k * DIGEST_WORDS + j].clone())
+                .collect();
+
+            let in_link = one_hot_select(cs.namespace(|| format!("in_mux_{j}")), &in_sel, &vals)?;
+            enforce_cond_link_eq_u32(
+                cs.namespace(|| format!("in_bind_{j}")),
+                &pos[0],
+                &in_link,
+                &h_in_words[j],
+            )?;
+
+            let out_link = one_hot_select(cs.namespace(|| format!("out_mux_{j}")), &out_sel, &vals)?;
+            enforce_cond_link_eq_u32(
+                cs.namespace(|| format!("out_bind_{j}")),
+                &pos[num_steps - 1],
+                &out_link,
+                &out_words[j],
+            )?;
+        }
+
+        Ok(vec![])
+    }
+
+    fn num_challenges(&self) -> usize {
+        0
+    }
+
+    fn synthesize<CS: ConstraintSystem<Scalar>>(
+        &self,
+        _: &mut CS,
+        _: &[AllocatedNum<Scalar>],
+        _: &[AllocatedNum<Scalar>],
+        _: Option<&[Scalar]>,
+    ) -> Result<(), SynthesisError> {
+        Ok(())
+    }
+}
+
+fn uniform_steps(
+    inputs: &[StepInput],
+    digests: &[[u8; 32]],
+) -> Vec<BoundStyleStepUniform> {
+    inputs
+        .iter()
+        .enumerate()
+        .map(|(i, input)| BoundStyleStepUniform {
+            step_index: i,
+            num_steps: inputs.len(),
+            input: input.clone(),
+            link_digests: digests.to_vec(),
+            _p: PhantomData,
+        })
+        .collect()
+}
+
+/// L6: uniform selector binding should prove **and** verify (the fix for L4b-single / L5).
+#[test]
+fn ladder_6_uniform_selector() {
+    let (inputs, digests) = build_consistent_bound_batch(NUM_STEPS);
+    let steps = uniform_steps(&inputs, &digests);
+    let core = core_alloc_only(digests.clone());
+    let r = run_neutronnova("L6 uniform selector", &steps[0], &core, &steps, &core);
+    eprintln!("L6 result: {r:?}");
+    assert!(r.verify_ok, "L6 uniform selector should verify: {r:?}");
+}
+
+/// Negative control: a tampered link digest must break verification.
+#[test]
+fn ladder_6_uniform_selector_rejects_bad_link() {
+    let (inputs, mut digests) = build_consistent_bound_batch(NUM_STEPS);
+    // Corrupt the first link so step 0's h_out no longer matches shared[0].
+    digests[0][0] ^= 0x01;
+    let steps = uniform_steps(&inputs, &digests);
+    let core = core_alloc_only(digests.clone());
+    let r = run_neutronnova("L6 uniform selector (bad link)", &steps[0], &core, &steps, &core);
+    eprintln!("L6 bad-link result: {r:?}");
+    assert!(
+        !r.verify_ok,
+        "tampered link must not verify: {r:?}"
+    );
 }

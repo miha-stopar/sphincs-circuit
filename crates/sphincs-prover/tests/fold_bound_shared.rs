@@ -27,9 +27,9 @@ fn max_bound_steps() -> usize {
         .unwrap_or(4)
 }
 
-/// Spartan2 0.9.0 NeutronNova verify fails on `enforce_words_eq_shared` (see `docs/SHARED_WITNESS_DEBUG.md` L4b-single).
+/// Uniform selector-based step binding (see `FoldStepBoundCircuit`) keeps the R1CS shape
+/// identical across folded instances, so NeutronNova prove **and** verify succeed.
 #[test]
-#[ignore = "enforce_words_eq_shared (compression out → shared) breaks NeutronNova verify on Spartan2 0.9.0"]
 fn fold_bound_shared_links_prove_and_verify() {
     let seed = [0x33u8; CRYPTO_SEEDBYTES];
     let msg = b"sphincs-prover bound shared fold";

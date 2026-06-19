@@ -34,8 +34,8 @@ pub use hypertree::{
 };
 pub use merkle::{compute_root_bits, synthesize_compute_root};
 pub use shared_link::{
-    alloc_digest_shared, enforce_bytes_eq_shared, enforce_words_eq_shared, link_shared_slice,
-    u32_words_from_shared, DIGEST_WORDS,
+    alloc_digest_shared, enforce_bytes_eq_shared, enforce_cond_link_eq_u32,
+    enforce_words_eq_shared, link_shared_slice, one_hot_select, u32_words_from_shared, DIGEST_WORDS,
 };
 pub use sha256_compress::{
     synthesize_compression, synthesize_compression_chain_for_fold_with_links,

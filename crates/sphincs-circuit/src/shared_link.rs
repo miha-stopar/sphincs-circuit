@@ -148,6 +148,80 @@ fn u32_from_scalar<Scalar: PrimeField>(s: Scalar) -> u32 {
     u32::from_le_bytes(bytes[0..4].try_into().expect("u32 limb"))
 }
 
+/// One-hot multiplexer: returns `sum_k sel[k] * vals[k]`.
+///
+/// Caller must guarantee `sel` is one-hot (exactly one `1`) or all-zero; this is what makes the
+/// result equal a single selected `vals[k]` (or `0`). Used to pick a shared link slot for a
+/// folded step whose position is encoded as a witness selector, keeping the R1CS shape identical
+/// across all NeutronNova step instances.
+pub fn one_hot_select<Scalar, CS>(
+    mut cs: CS,
+    sel: &[AllocatedNum<Scalar>],
+    vals: &[AllocatedNum<Scalar>],
+) -> Result<AllocatedNum<Scalar>, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(sel.len(), vals.len());
+    let mut prods = Vec::with_capacity(sel.len());
+    for (k, (s, v)) in sel.iter().zip(vals.iter()).enumerate() {
+        prods.push(s.mul(cs.namespace(|| format!("prod_{k}")), v)?);
+    }
+    let val: Option<Scalar> = prods
+        .iter()
+        .try_fold(Scalar::ZERO, |acc, p| p.get_value().map(|v| acc + v));
+    let result = AllocatedNum::alloc(cs.namespace(|| "select"), || {
+        val.ok_or(SynthesisError::AssignmentMissing)
+    })?;
+    cs.enforce(
+        || "select_sum",
+        |lc| {
+            let mut lc = lc;
+            for p in &prods {
+                lc = lc + p.get_variable();
+            }
+            lc
+        },
+        |lc| lc + CS::one(),
+        |lc| lc + result.get_variable(),
+    );
+    Ok(result)
+}
+
+/// Enforce `(1 - gate) * (link - value(word)) == 0`.
+///
+/// When `gate == 1` (a boundary step that has no link on this side) the equality is skipped;
+/// otherwise the shared limb `link` must equal the numeric value of the 32-bit `word`.
+pub fn enforce_cond_link_eq_u32<Scalar, CS>(
+    mut cs: CS,
+    gate: &AllocatedNum<Scalar>,
+    link: &AllocatedNum<Scalar>,
+    word: &UInt32,
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let bits = word.clone().into_bits();
+    assert_eq!(bits.len(), 32);
+    cs.enforce(
+        || "cond_link_eq",
+        |lc| lc + CS::one() - gate.get_variable(),
+        |lc| {
+            let mut lc = lc + link.get_variable();
+            let mut coeff = Scalar::ONE;
+            for b in &bits {
+                lc = lc - &b.lc(CS::one(), coeff);
+                coeff = coeff.double();
+            }
+            lc
+        },
+        |lc| lc,
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,6 +242,74 @@ mod tests {
         assert!(
             cs.is_satisfied(),
             "bytes glue unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
+    }
+
+    const SHA256_IV: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+
+    #[test]
+    fn enforce_words_eq_shared_compress_gadget_output_is_satisfied() {
+        use crate::sha256_compress::{
+            state_bytes_to_words, synthesize_compression_for_fold_h_words,
+        };
+
+        type Scalar = blstrs::Scalar;
+        let mut h_in = [0u8; 32];
+        for (i, &w) in SHA256_IV.iter().enumerate() {
+            h_in[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+        }
+        let block = [0u8; 64];
+        let mut cs = TestConstraintSystem::<Scalar>::new();
+        let h_words: Vec<UInt32> = state_bytes_to_words(&h_in)
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| {
+                UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w)).unwrap()
+            })
+            .collect();
+        let out_words =
+            synthesize_compression_for_fold_h_words(&mut cs, &h_words, &block).unwrap();
+        let mut h_out = [0u8; 32];
+        for (i, word) in out_words.iter().enumerate() {
+            let mut w = 0u32;
+            for (j, bit) in word.clone().into_bits().iter().enumerate() {
+                if bit.get_value() == Some(true) {
+                    w |= 1 << j;
+                }
+            }
+            h_out[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+        }
+        let shared = alloc_digest_shared(&mut cs, "s", h_out).unwrap();
+        enforce_words_eq_shared(&mut cs, "step", &out_words, &shared).unwrap();
+        assert!(
+            cs.is_satisfied(),
+            "gadget out-pin unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
+    }
+
+    #[test]
+    fn u32_words_from_shared_then_compress_is_satisfied() {
+        use crate::sha256_compress::synthesize_compression_for_fold_h_words;
+
+        type Scalar = blstrs::Scalar;
+        let mut h_in = [0u8; 32];
+        for (i, &w) in SHA256_IV.iter().enumerate() {
+            h_in[i * 4..i * 4 + 4].copy_from_slice(&w.to_be_bytes());
+        }
+        let block = [1u8; 64];
+        let mut cs = TestConstraintSystem::<Scalar>::new();
+        let shared = alloc_digest_shared(&mut cs, "link0", h_in).unwrap();
+        let h_words = u32_words_from_shared(&mut cs, "h_in", &shared).unwrap();
+        let _out =
+            synthesize_compression_for_fold_h_words(&mut cs, &h_words, &block).unwrap();
+        assert!(
+            cs.is_satisfied(),
+            "shared h_in compress unsatisfied: {:?}",
             cs.which_is_unsatisfied()
         );
     }

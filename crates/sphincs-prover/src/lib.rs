@@ -12,8 +12,9 @@
 //!
 //! That batching is what “core + folding constraints combined” means in code. It does **not** by
 //! itself equate step compression wires to core witnesses — use [`SpartanCircuit::shared`] for that
-//! ([`FoldStepBoundCircuit`] / [`FoldCoreBoundCircuit`], currently blocked on Spartan2 0.9.0), or
-//! pack glue into one step ([`FoldPackedChainCircuit`], [`FoldPackedCoreBoundCircuit`]).
+//! ([`FoldStepBoundCircuit`] / [`FoldCoreBoundCircuit`], or [`FoldVerifyCoreCircuit`] for real
+//! SPHINCS+ glue), or pack glue into one step ([`FoldPackedChainCircuit`],
+//! [`FoldPackedCoreBoundCircuit`]).
 //!
 //! **Demo (split):** `cargo test -p sphincs-prover --features pqclean --test fold_split_step_core`
 
@@ -22,11 +23,13 @@ mod core;
 mod fold;
 mod packed;
 mod trace;
+mod verify_core;
 
 pub use bound::{
     bound_steps_from_inputs, FoldCoreBoundCircuit, FoldPackedCoreBoundCircuit, FoldStepBoundCircuit,
 };
 pub use core::{FoldCoreChainCircuit, FoldCoreCircuit};
+pub use verify_core::{FoldVerifyCoreCircuit, VerifyCorePhase, message_bytes, sig_r};
 pub use fold::{
     fold_and_prove, fold_prove_verify_timed, setup, setup_with_default_core, setup_with_proto,
     verify_proof, FoldProof, FoldProverKey, FoldStepCircuit, FoldVerifierKey, ProveTimings,

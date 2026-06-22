@@ -6,8 +6,9 @@
 //! - [`FoldStepCircuit`] — folding constraints (one compression per instance)
 //! - [`FoldCoreChainCircuit`] — core constraints (trace link bytes, separate R1CS)
 //!
-//! Both are satisfied and verified together via [`fold_and_prove`], but link digests in the core
-//! are **not** automatically tied to step compression wires until shared witness glue lands.
+//! Both are satisfied and verified together via [`fold_and_prove`]. For sound binding use
+//! [`FoldStepBoundCircuit`] + [`FoldCoreBoundCircuit`] or [`FoldVerifyCoreCircuit`]; this test
+//! intentionally uses unsound byte-only links in the core for illustration.
 
 #![cfg(feature = "pqclean")]
 

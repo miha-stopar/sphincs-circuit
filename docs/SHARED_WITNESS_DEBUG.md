@@ -1,16 +1,30 @@
 # Shared witness debug environment
 
-Isolated reproduction of the Spartan2 0.9.0 NeutronNova verify failure that blocks **split** step↔core binding (`FoldStepBoundCircuit` / `fold_bound_shared`).
+Isolated reproduction of the Spartan2 0.9.0 NeutronNova verify failure that **blocked** split step↔core binding (`FoldStepBoundCircuit` / `fold_bound_shared`). **Status: resolved** — see [Fix (uniform selector binding)](#fix-uniform-selector-binding).
 
 No PQClean, no SPHINCS trace — synthetic circuits in [`neutronnova_shared_debug.rs`](../crates/sphincs-prover/tests/neutronnova_shared_debug.rs).
 
 ---
 
-## What problem are we debugging?
+## Current status
+
+| Path | verify |
+|------|--------|
+| **L6** uniform selector (`BoundStyleStepUniform`) | **OK** |
+| **L5** production `FoldStepBoundCircuit` + `FoldCoreBoundCircuit` | **OK** |
+| **`fold_bound_shared`** (full SPHINCS+ trace, needs `pqclean`) | **OK** |
+| **L4b–L4f** (old per-step conditional pins) | **FAIL** — kept as negative controls |
+| **`FoldPackedCoreBoundCircuit`** (glue inside one step) | **OK** — still valid, no longer required |
+
+Split step↔core binding works. Production code is in [`bound.rs`](../crates/sphincs-prover/src/bound.rs); reusable gadgets are `one_hot_select` and `enforce_cond_link_eq_u32` in [`shared_link.rs`](../crates/sphincs-circuit/src/shared_link.rs).
+
+---
+
+## What problem were we debugging?
 
 **Goal (production):** connect folded step compressions to a separate core circuit using `SpartanCircuit::shared` — one witness prefix both sides read.
 
-**Symptom:** `prove` succeeds, `verify` fails:
+**Symptom (before fix):** `prove` succeeds, `verify` fails:
 
 ```text
 ProofVerifyError { reason: "Relaxed Spartan verify failed: InvalidSumcheckProof" }
@@ -20,17 +34,44 @@ ProofVerifyError { reason: "Relaxed Spartan verify failed: InvalidSumcheckProof"
 
 ---
 
-## Root cause (localized)
+## Root cause
 
 | Finding | Detail |
 |---------|--------|
 | **Not** `num_shared > 0` alone | L1–L3 and L4a pass with 1, 8, and **24** shared scalars |
 | **Fixed (2025-05)** | Old `enforce_num_eq_u32` zipped `to_bits_le` vs `into_bits_be` — **locally unsatisfiable** with intended witness; fixed via UInt32 LE bit reconstruction |
-| **L4** | Core-only `enforce_bytes_eq_shared` — **verify OK** after fix |
-| **L4b** | `FoldStepBoundCircuit` shared pin chain + core alloc-only — **verify FAIL** → remaining bug is **step-side** shared wiring under NeutronNova fold |
-| **L5 / `fold_bound_shared`** | Step + core — still fail until step-side issue is resolved |
+| **L4** | Core-only `enforce_bytes_eq_shared` — **verify OK** after bit-order fix |
+| **L4b–L4f (historical)** | Per-step conditional pins (`if step_index == k { pin link k }`) — **verify FAIL** |
+| **L5 / `fold_bound_shared` (before fix)** | Same conditional pattern in production `bound.rs` — **verify FAIL** |
+| **Fixed (2025-06)** | **Uniform selector binding** — identical R1CS shape on every folded instance; L5, L6, `fold_bound_shared` **verify OK** |
 
-Scalar equality (`aux == shared[i]`) works. Core byte glue works after reconstruction. Step `u32_words_from_shared` / `enforce_words_eq_shared` under folded instances does not verify yet.
+### What actually broke (not an IN vs OUT Spartan2 bug)
+
+The ladder initially suggested an **IN vs OUT asymmetry**: read-from-shared (L4b-in) passed, write-to-shared (L4b-single) failed. L4c–L4f explored equalized layouts, byte glue, mirror alloc words, and scalar decoupling — all still failed when any per-step OUT-pin was present.
+
+The real issue was **R1CS shape mismatch across folded instances**:
+
+- NeutronNova `setup` synthesizes **one** step shape from prototype `steps[0]`.
+- All N folded instances are checked against that **same** matrix.
+- The old design branched on `step_index`: step 0 pinned OUT to `link[0]`, step 1 pinned IN from `link[0]` and OUT to `link[1]`, etc. Each instance synthesized **different constraints on different shared columns**.
+- Only the prototype instance was satisfiable; steps `1..n` failed `is_sat`, corrupting NIFS, and verify failed downstream (often surfacing as an unrelated verifier-circuit row, e.g. "row 132").
+
+`enforce_words_eq_shared` itself is fine — it is locally satisfiable (`shared_link` unit tests, `local_r1cs_*`). The failure was **our circuit structure**, not Spartan2 rejecting shared writes.
+
+---
+
+## Fix (uniform selector binding)
+
+Every folded step instance now runs the **same** constraint structure. Per-step variation lives only in witness **values**, not in which constraints are allocated.
+
+1. **One-hot `pos`** — `pos[i] = (i == step_index)`, boolean + sums to 1.
+2. **Public `step_index`** — `Σ i·pos[i] == step_index` (soundness: selectors can't be forged).
+3. **Mux over all links** — `one_hot_select` reads `link[step_index - 1]` as `h_in` and writes `link[step_index]` as `h_out`, referencing **every** shared column on **every** instance.
+4. **Boundary gates** — `enforce_cond_link_eq_u32` with `pos[0]` skips IN-pin on step 0; `pos[last]` skips OUT-pin on the last step.
+
+Implementation: [`bound.rs`](../crates/sphincs-prover/src/bound.rs) `FoldStepBoundCircuit::synthesize_precommitted_linked`. Synthetic mirror: `BoundStyleStepUniform` in the debug test file (L6).
+
+**Cost:** `step_index` is now a public input; each step adds selector + mux constraints (`O(num_steps × num_links)` per step). That is the price of uniform shape under NeutronNova's single-shape folding model.
 
 ---
 
@@ -38,11 +79,11 @@ Scalar equality (`aux == shared[i]`) works. Core byte glue works after reconstru
 
 | File | Role |
 |------|------|
-| [`crates/sphincs-prover/tests/neutronnova_shared_debug.rs`](../crates/sphincs-prover/tests/neutronnova_shared_debug.rs) | Debug ladder L0–L5 |
+| [`crates/sphincs-prover/tests/neutronnova_shared_debug.rs`](../crates/sphincs-prover/tests/neutronnova_shared_debug.rs) | Debug ladder L0–L6 |
 | [`crates/sphincs-prover/tests/neutronnova_replica.rs`](../crates/sphincs-prover/tests/neutronnova_replica.rs) | Control: Microsoft SHA bench, `shared() → []` |
-| [`crates/sphincs-prover/tests/fold_bound_shared.rs`](../crates/sphincs-prover/tests/fold_bound_shared.rs) | Full SPHINCS path (ignored, needs `pqclean`) |
-| [`crates/sphincs-circuit/src/shared_link.rs`](../crates/sphincs-circuit/src/shared_link.rs) | Bit-decomposition glue (suspect) |
-| [`crates/sphincs-prover/src/bound.rs`](../crates/sphincs-prover/src/bound.rs) | Production binding attempt |
+| [`crates/sphincs-prover/tests/fold_bound_shared.rs`](../crates/sphincs-prover/tests/fold_bound_shared.rs) | Full SPHINCS path (needs `pqclean`) |
+| [`crates/sphincs-circuit/src/shared_link.rs`](../crates/sphincs-circuit/src/shared_link.rs) | Shared-link gadgets (`one_hot_select`, `enforce_cond_link_eq_u32`, …) |
+| [`crates/sphincs-prover/src/bound.rs`](../crates/sphincs-prover/src/bound.rs) | Production split binding (`FoldStepBoundCircuit`, `FoldCoreBoundCircuit`) |
 
 ---
 
@@ -56,9 +97,11 @@ zk.rs:719: range end index 4 out of range for slice of length 2
 
 Every ladder level uses **one SHA-256 compression** in step `precommitted` (same gadget as `neutronnova_replica`, ≈26k constraints). Shared-witness logic is layered on top.
 
+**Folded step rule (critical):** every instance must synthesize the **same** `precommitted` constraint structure and reference the **same** witness columns. Branching on `step_index` to pin different link slots breaks NeutronNova unless you equalize with a uniform selector (the fix) or pack glue into a single circuit (`FoldPackedCoreBoundCircuit`).
+
 ---
 
-## Debug ladder (L0 → L5)
+## Debug ladder (L0 → L6)
 
 Each level runs: `setup` → `prep_prove` → `prove` → `verify` on **4 step instances + 1 core** (`NUM_STEPS = 4`).
 
@@ -69,31 +112,17 @@ Each level runs: `setup` → `prep_prove` → `prove` → `verify` on **4 step i
 | **L2** | 8 | scalar (one digest width) | **OK** |
 | **L3** | 1 | alloc only, no precommitted refs | **OK** |
 | **L4a** | 24 | scalar eq, 3 digest links | **OK** |
-| **L4** | 24 | `enforce_bytes_eq_shared` (core glue) | **OK** (after `enforce_num_eq_u32` fix) |
-| **L4b** | 24 | `FoldStepBoundCircuit` chain + core alloc-only | **FAIL** — full step chain |
-| **L4b-in** | 24 | step 1: `u32_words_from_shared` only | **OK** — IN-from-shared works |
-| **L4b-single** | 24 | step 0: `enforce_words_eq_shared` only | **FAIL** — OUT-pin fails |
-| **L4b-out-1link** | 8 | step 0 out-pin, one digest | **FAIL** — not a width issue |
-| **L4c-indirect** | 24 | `digest_eq` + `enforce_bytes_eq_shared` on all steps (equalized) | prep **OK**, verify **FAIL** |
-| **L4c-mirror** | 24 | `digest_eq` + alloc mirror + `enforce_words_eq_shared` (equalized) | prep **OK**, verify **FAIL** |
-| **L5** | 24 | step + core (consistent chain) | full split binding |
+| **L4** | 24 | `enforce_bytes_eq_shared` (core glue) | **OK** |
+| **L4b** | 24 | old conditional step chain + core alloc-only | **FAIL** (historical) |
+| **L4b-in** | 24 | step 1 only: `u32_words_from_shared` | **OK** |
+| **L4b-single** | 24 | step 0 only: `enforce_words_eq_shared` | **FAIL** (historical) |
+| **L4b-out-1link** | 8 | step 0 out-pin, one digest | **FAIL** (historical) |
+| **L4c-indirect** | 24 | equalized byte glue on all steps | **FAIL** (historical) |
+| **L4c-mirror** | 24 | equalized mirror + out-pin on all steps | **FAIL** (historical) |
+| **L5** | 24 | production step + core (uniform selector) | **OK** |
+| **L6** | 24 | synthetic `BoundStyleStepUniform` | **OK** |
 
-**L4 vs L4a** fixed the old `enforce_num_eq_u32` bug. **L4b splits** show verify fails on **`enforce_words_eq_shared`** (compression output → shared), not on `u32_words_from_shared` (shared → compression input).
-
-**L4c** tried core-style and mirror workarounds with **equalized precommitted layout** on every folded step instance (padding row duplicates penultimate step). `prep_prove` passes; verify still fails with `InvalidSumcheckProof` — the bug is not fixed by routing through byte glue or an allocated mirror.
-
-**Local R1CS (2025-05):** `enforce_words_eq_shared` on real compression gadget output is **locally satisfiable** (`shared_link` unit test + `local_r1cs_l4b_single_step0_out_pin_satisfied`). The failure is **not** unsatisfiable constraints — prove/verify disagree under NeutronNova fold.
-
-**Direction asymmetry (2025-05):**
-
-| Pattern | verify |
-|---------|--------|
-| **IN** partial: `u32_words_from_shared` on one link slot (L4b-in) | **OK** |
-| **OUT** partial: any out-pin to one link slot (L4b-single, L4c, L4d scalar decoupled) | **FAIL** |
-| **All shared** referenced in every step `precommitted` (L4e: scalar `aux == shared[i]` for all 24) | **OK** |
-| L4e + step-0 `enforce_words_eq_shared` out-pin (L4f) | **FAIL** |
-
-So NeutronNova verify tolerates **read-from-shared** and **touch-all-shared-scalars**, but breaks on **write-to-shared** (compression output → shared slot), even with scalar-only decoupled witnesses (no `UInt32` wire to gadget).
+L4b–L4f tests are **negative controls** — they reproduce the old per-step conditional pattern and should keep failing unless someone reintroduces that bug.
 
 ---
 
@@ -102,19 +131,22 @@ So NeutronNova verify tolerates **read-from-shared** and **touch-all-shared-scal
 From repo root:
 
 ```bash
-# Full ladder + summary (recommended)
+# Full ladder + summary (L0–L5; L4b–L4c still print FAIL in summary)
 cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_summary_all_phases -- --nocapture
+
+# Fix validation
+cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_6_uniform_selector -- --nocapture
+cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_5_production_bound_circuits_synthetic -- --nocapture
 
 # Key isolation tests
 cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4a_multi_link_scalar_equality_core -- --nocapture
 cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4_bound_style_core_bit_decomposition -- --nocapture
-cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_5_production_bound_circuits_synthetic -- --nocapture
 
 # Control: real SHA steps, empty shared (should pass)
 cargo test -p sphincs-prover --test neutronnova_replica -- --nocapture
 
-# Full SPHINCS binding (same verify error, needs pqclean)
-cargo test -p sphincs-prover --features pqclean --test fold_bound_shared -- --ignored --nocapture
+# Full SPHINCS binding (needs pqclean)
+cargo test -p sphincs-prover --features pqclean --test fold_bound_shared fold_bound_shared_links_prove_and_verify -- --nocapture
 ```
 
 No `--features pqclean` needed for the isolated ladder.
@@ -132,13 +164,13 @@ prove: ok
 verify: ok | FAILED — …
 ```
 
-Typical failure (L4, L5, `fold_bound_shared`):
+Historical failure pattern (L4b–L4f, old L5):
 
 ```text
 verify: FAILED — ProofVerifyError: Relaxed Spartan verify failed: InvalidSumcheckProof
 ```
 
-Failure is in the **relaxed Spartan** leg of verify (after NIFS on the verifier circuit), not in bellpepper synthesis.
+Failure was in the **relaxed Spartan** leg of verify (after NIFS on the verifier circuit), not in bellpepper synthesis. With the uniform selector fix, L5/L6/`fold_bound_shared` reach `verify: ok`.
 
 ---
 
@@ -146,17 +178,20 @@ Failure is in the **relaxed Spartan** leg of verify (after NIFS on the verifier 
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│ L0–L3, L4a, L4, L4b-in   verify OK                          │
-│ L4b-single/out, L4b, L5  FAIL — enforce_words_eq_shared     │
-│ L4c indirect/mirror      prep OK, verify FAIL (same error)  │
-│ fold_bound_shared        same (out-pin to shared)           │
-│ fold_bound_packed_core   verify OK, glue inside C_step      │
+│ L0–L3, L4a, L4, L4b-in, L5, L6          verify OK            │
+│ fold_bound_shared                        verify OK            │
+│ L4b-single/out, L4b, L4c, L4d–L4f       FAIL (historical)   │
+│ fold_bound_packed_core                   verify OK (packed)   │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## L4b sub-ladder (step-side splits)
+## L4b–L4f sub-ladder (historical negative controls)
+
+These tests document the **old broken pattern**. They should **fail** verify — that is expected.
+
+### L4b (per-step conditional pins)
 
 ```bash
 cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4b -- --nocapture
@@ -164,14 +199,12 @@ cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4b -- --noca
 
 | Test | What it isolates | verify |
 |------|------------------|--------|
-| `ladder_4b_in_step1_shared_h_in_only` | `u32_words_from_shared` on step 1 | **OK** |
+| `ladder_4b_in_step1_shared_h_in_only` | `u32_words_from_shared` on step 1 only | **OK** |
 | `ladder_4b_single_step0_out_pin_only` | `enforce_words_eq_shared` on step 0 only | **FAIL** |
 | `ladder_4b_out_one_link_step0_only` | out-pin with 8 shared (one link) | **FAIL** |
-| `ladder_4b_step_shared_pin_chain_core_alloc_only` | full in+out chain | **FAIL** |
+| `ladder_4b_step_shared_pin_chain_core_alloc_only` | full conditional in+out chain | **FAIL** |
 
-Folded steps must share the same `precommitted` gadget path; mixing replica SHA on some instances causes `Precommitted variables are not allocated correctly`.
-
-## L4c out-pin workarounds (equalized layout)
+### L4c (equalized layout workarounds — still failed)
 
 ```bash
 cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4c -- --nocapture
@@ -179,29 +212,30 @@ cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4c -- --noca
 
 | Test | Pin strategy | prep_prove | verify |
 |------|--------------|------------|--------|
-| `ladder_4c_out_pin_indirect_bytes` | `enforce_digest_bytes_eq_words` + `enforce_bytes_eq_shared` on every step | **OK** | **FAIL** |
-| `ladder_4c_out_pin_mirror_alloc_words` | gadget → alloc mirror → `enforce_words_eq_shared` on every step | **OK** | **FAIL** |
-| `ladder_4c_out_pin_indirect_bytes_step0_only` | indirect pin on step 0 only (unequal aux) | **FAIL** | — |
+| `ladder_4c_out_pin_indirect_bytes` | byte glue on every step | **OK** | **FAIL** |
+| `ladder_4c_out_pin_mirror_alloc_words` | mirror alloc + out-pin on every step | **OK** | **FAIL** |
+| `ladder_4c_out_pin_indirect_bytes_step0_only` | indirect pin on step 0 only | **FAIL** | — |
 
-Unequal per-instance `precommitted` aux counts break `prep_prove` (`Precommitted variables are not allocated correctly`). Production `bound.rs` must not add digest/bytes glue on only some step indices without equalizing all instances.
+Equalizing aux **count** on every instance was necessary but not sufficient — the remaining bug was **which columns** each instance's constraints referenced.
 
-## L4d–L4f isolation (write vs read, partial vs all-shared)
+### L4d–L4f (misleading IN/OUT asymmetry trail)
 
 ```bash
-cargo test -p sphincs-circuit shared_link::tests::enforce_words_eq_shared_compress_gadget_output_is_satisfied -- --nocapture
 cargo test -p sphincs-prover --test neutronnova_shared_debug local_r1cs -- --nocapture
 cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4e -- --nocapture
 cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4f -- --nocapture
 ```
 
-| Test | What it shows |
-|------|----------------|
-| `local_r1cs_l4b_single_step0_out_pin_satisfied` | Out-pin R1CS is satisfiable in bellpepper |
-| `ladder_4d_scalar_decoupled_out_pin_full_layout` | Out-pin without gadget wire still fails verify |
-| `ladder_4e_fold_gadget_all_shared_scalar_eq` | Referencing **all** shared scalars every step passes |
-| `ladder_4f_all_shared_scalar_eq_plus_step0_out_pin` | Adding out-pin on top of L4e breaks verify again |
+| Test | What it showed (in hindsight) |
+|------|-------------------------------|
+| `local_r1cs_l4b_single_step0_out_pin_satisfied` | Out-pin R1CS is satisfiable in bellpepper — not a local encoding bug |
+| `ladder_4d_scalar_decoupled_out_pin_full_layout` | Per-step partial OUT-pin still shape-mismatched |
+| `ladder_4e_fold_gadget_all_shared_scalar_eq` | Touching **all** shared columns every step passes (uniform column set) |
+| `ladder_4f_all_shared_scalar_eq_plus_step0_out_pin` | Adding step-0-only OUT-pin reintroduces shape mismatch |
 
-## Internals walkthrough (what happens in our case)
+---
+
+## Internals walkthrough
 
 Spartan2 NeutronNova treats one proof as **two R1CS relations** (`S_step`, `S_core`) glued in the **proof algebra** (NIFS fold + batched sum-check), not as one bellpepper `ConstraintSystem`.
 
@@ -217,7 +251,7 @@ z_step = [ W_shared | W_precommitted | W_rest | 1 | public_values ]
 
 `SplitR1CSShape::equalize(S_step, S_core)` pads the **smaller** shape so step and core share the same `num_shared`, `num_precommitted`, `num_rest` **counts** (matrices still differ).
 
-**Prototype rule:** every folded step instance must allocate **≥ `num_precommitted_unpadded`** aux vars in `precommitted()` or `prep_prove` fails (`Precommitted variables are not allocated correctly`). Logic may differ by `step_index`; aux **count** may not (unless the big SHA gadget dominates).
+**Prototype rule:** every folded step instance must synthesize the **same** constraint structure in `precommitted()` referencing the **same** witness columns, or non-prototype instances will not satisfy `S_step` and NIFS will fold bad witnesses.
 
 ### Phase 1 — `shared_witness` (once)
 
@@ -227,7 +261,7 @@ From `neutronnova_zk.rs` `prep_prove`:
 2. Copy first `num_shared_unpadded` aux values into `W[0..24]`.
 3. PCS-commit → `comm_W_shared`.
 
-For `FoldStepBoundCircuit`, `shared()` is `alloc_digest_shared` over all `link_digests` (24 field elements). **Every** step instance and the core will reuse this **same** `W_shared` prefix and **same** `comm_W_shared`.
+For `FoldStepBoundCircuit`, `shared()` is `alloc_digest_shared` over all `link_digests` (24 field elements). **Every** step instance and the core reuse this **same** `W_shared` prefix and **same** `comm_W_shared`.
 
 ### Phase 2 — `precommitted_witness` (per instance)
 
@@ -238,24 +272,22 @@ For each `step_circuits[i]` (parallel):
 3. Copy next `num_precommitted_unpadded` aux into `W[24..]`.
 4. PCS-commit → `comm_W_precommitted` (per instance).
 
-**Our case — L4b-single (verify FAIL):**
+**Old broken pattern — L4b-single (verify FAIL):**
 
-| Instance | `precommitted` logic | Coupling to `W_shared` |
-|----------|----------------------|-------------------------|
-| Step 0 | compress + **`enforce_words_eq_shared(out, shared[0..8])`** | **write**: gadget output → shared slot 0 |
-| Steps 1–3 | compress only | no shared refs |
+| Instance | `precommitted` logic | Problem |
+|----------|----------------------|---------|
+| Step 0 | compress + OUT-pin to `shared[0..8]` | shape A |
+| Steps 1–3 | compress only, no shared refs | shape B ≠ A |
 
-**Our case — L4b-in (verify OK):**
+**Fix — uniform selector (L5/L6, verify OK):**
 
-| Instance | `precommitted` logic | Coupling to `W_shared` |
-|----------|----------------------|-------------------------|
-| Step 0 | compress | none |
-| Step 1 | **`u32_words_from_shared(shared[0..8])`** + compress | **read**: shared slot 0 → gadget input |
-| Steps 2–3 | compress | none |
+| Instance | `precommitted` logic |
+|----------|----------------------|
+| All steps | same: `pos` one-hot + mux all links + compress + conditional IN/OUT bind |
 
-Locally, both satisfy R1CS (`local_r1cs_*` tests). `W_shared` values are identical across instances (from step 0 `shared()`). Per-instance `W_precommitted` differs (different `block`, different active constraints).
+Per-instance witnesses differ (`pos`, `block`, `h_in` values), but the R1CS **shape** is identical.
 
-### Phase 3 — matvec cache (`prep_prove`, our circuits)
+### Phase 3 — matvec cache (`prep_prove`)
 
 Our ladder circuits have `num_rest = 0` and `num_challenges = 0`, so Spartan2 caches per step instance:
 
@@ -264,38 +296,28 @@ z = [ W | 1 | public_values ]
 (Az, Bz, Cz) = S_step.multiply_vec(z)
 ```
 
-Also builds `cached_step_i64` for fast NIFS round 0; positions where values don't fit `i64` go to `large_positions` and are zeroed in the i64 cache (corrected in field arithmetic later).
-
 This cache is **deterministic** from `prep_prove` and reused in `prove` (must match same `public_values`).
 
 ### Phase 4 — `prove`
 
-1. **Rerandomize** PCS blinds; all step instances **reuse core's `comm_W_shared`** (`rerandomize_with_shared_in_place`).
-2. `r1cs_instance_and_witness` per step (fast path: no `synthesize` — witness already complete).
-3. **NIFS** folds 4 step `(U_i, W_i)` → `(U_fold, W_fold)` using cached matvec / i64 layers + verifier-circuit Fiat–Shamir.
+1. **Rerandomize** PCS blinds; all step instances **reuse core's `comm_W_shared`**.
+2. `r1cs_instance_and_witness` per step (fast path: witness already complete).
+3. **NIFS** folds 4 step `(U_i, W_i)` → `(U_fold, W_fold)`.
 4. **Batched sum-check** over folded step polynomials + core polynomials.
 5. **Relaxed Spartan SNARK** proving the NeutronNova **verifier circuit** trace.
 
-### Phase 5 — `verify` (where we fail)
+### Phase 5 — `verify`
 
-Verify reconstructs the same transcript and checks, in order:
+Verify reconstructs the same transcript and checks NIFS + relaxed Spartan. With valid per-instance witnesses (uniform shape), this passes. With shape-mismatched instances, `is_sat` fails for steps `1..n`, NIFS folds inconsistent data, and verify fails with `InvalidSumcheckProof`.
 
-1. Per-instance commitment / challenge consistency (`U.validate`).
-2. NIFS `verify` + **`relaxed_snark.verify`** on the verifier circuit ← we fail here: `InvalidSumcheckProof`.
-3. (Later) recomputed `quotient_step`, `quotient_core`, public IO equality.
+### What the link-pin constraint does
 
-So the failure is **not** bellpepper synthesis at verify time; it's that the **proof π** (sum-check / relaxed Spartan leg) doesn't match what the verifier recomputes from `vk` + π.
+`enforce_words_eq_shared` / `enforce_cond_link_eq_u32` couple:
 
-### What the out-pin constraint actually does
+- `W_shared[k]` (committed once)
+- `W_precommitted[j]` (compression `UInt32` bits)
 
-`enforce_words_eq_shared` adds rows coupling:
-
-- `W_shared[k]` (committed once, indices 0..7 for link 0)
-- `W_precommitted[j]` (compression output `UInt32` bits, deep in SHA gadget)
-
-via `enforce_num_eq_u32`: `shared_limb - Σ bit_i·2^i = 0`.
-
-That is a **cross-segment** constraint (shared column ↔ precommitted column). IN-pin does the same algebra but wires shared → **fresh** input `UInt32` consumed by compress, not compress **output**.
+via `shared_limb - Σ bit_i·2^i = 0` (or gated variant). This cross-segment coupling is fine **when every instance uses the same column layout**.
 
 ### Debugging checklist
 
@@ -304,43 +326,25 @@ That is a **cross-segment** constraint (shared column ↔ precommitted column). 
 cargo test -p sphincs-circuit shared_link::tests::enforce_words_eq_shared_compress_gadget_output_is_satisfied -- --nocapture
 cargo test -p sphincs-prover --test neutronnova_shared_debug local_r1cs -- --nocapture
 
-# 2. Minimal pass vs fail under NeutronNova
-cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4b_in_step1_shared_h_in_only -- --nocapture
+# 2. Fix validation
+cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_6_uniform_selector -- --nocapture
+cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_5_production_bound_circuits_synthetic -- --nocapture
+
+# 3. Historical failures (should still fail)
 cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4b_single_step0_out_pin_only -- --nocapture
-
-# 3. Isolation ladder (direction / all-shared touch)
-cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4e -- --nocapture   # pass
-cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4f -- --nocapture   # fail
-
-# 4. Spartan2 internal spans (if tracing enabled in your build)
-RUST_LOG=spartan2=info cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4b_single -- --nocapture
+cargo test -p sphincs-prover --test neutronnova_shared_debug ladder_4f -- --nocapture
 ```
 
 **Interpretation guide:**
 
 | If this fails… | Likely layer |
 |----------------|--------------|
-| `local_r1cs_*` | Our constraint / witness encoding |
+| `local_r1cs_*` | Constraint / witness encoding |
 | `prep_prove` | Aux layout vs prototype (`steps[0]`) |
 | `prove` | Synthesis / instance generation |
-| `verify` + `InvalidSumcheckProof` | NIFS / sum-check / relaxed Spartan (prover π ≠ verifier) |
+| `verify` + `InvalidSumcheckProof` | Bad per-instance witnesses (often shape mismatch) or proof-system bug |
 
-**Prep vs verify failures are different bugs.** Unequal aux layout → prep. Satisfiable R1CS + prep OK + verify fail → proof-system path (current out-pin issue).
-
-### Hypotheses to test next (ordered)
-
-1. **NIFS i64 path:** out-pin constraints produce `large_positions` entries that are mishandled during fold (compare `large_positions.len()` L4b-in vs L4b-single — needs Spartan2 logging or fork).
-2. **Partial shared write:** Spartan2 only tested `shared() → []` or “touch all shared scalars” (L4e); partial **write** may be unsupported.
-3. **Verifier circuit / NIFS transcript:** prover and verifier disagree on folded instance claims when cross-segment coupling is present on compress **outputs**.
-
----
-
-## Next steps
-
-1. Spartan2 upstream repro: **L4b-in (read)** vs **L4b-single (write)** with identical fold gadget; attach `local_r1cs_*` showing constraints are satisfiable.
-2. Ask whether partial shared **write** in `precommitted` is supported, or whether integrators must touch every shared limb (L4e) — and whether OUT-pin is expected to work at all.
-3. Re-run `fold_bound_shared` after Spartan2 fix.
-4. Until then, use `FoldPackedCoreBoundCircuit` for sound local-chain demos.
+**Prep vs verify failures are different bugs.** Unequal aux layout → prep. Satisfiable R1CS + prep OK + verify fail → check whether all folded instances share the same R1CS shape.
 
 ---
 

@@ -162,8 +162,9 @@ No trusted setup. Groth16 not used.
 - [x] Local-chain core: `FoldCoreChainCircuit` + `chain::synthesize_sha256_state_equal` (boundary bytes; fold IO TBD)
 - [x] Fold longest local chain prefix (`fold_local_chain` test, default 16 steps)
 - [x] Sound local-chain wiring in one step (`FoldPackedChainCircuit<N>`, wire `h_out[i]→h_in[i+1]`)
-- [ ] Bind core link witnesses to per-instance folded step wires (multi-instance glue)
+- [x] Bind core link witnesses to per-instance folded step wires — uniform selector in [`FoldStepBoundCircuit`](../crates/sphincs-prover/src/bound.rs); `fold_bound_shared` passes (see [SHARED_WITNESS_DEBUG.md](SHARED_WITNESS_DEBUG.md))
 - [x] Fold prefix of full trace (`fold_trace_batch`: 8 steps CI, 32 ignored)
+- [x] Real `C_core` in prover — [`FoldVerifyCoreCircuit`](../crates/sphincs-prover/src/verify_core.rs): `hash_message` smoke passes (`fold_verify_core_hash_message`); full `synthesize_verify_core` next
 - [ ] Spartan2 proof of full verify on KAT (~all trace compressions)
 - [x] Bench harness: `cargo run -p sphincs-prover --features pqclean --release --bin fold-bench -- N`
 - [ ] Benchmark: full trace prove/verify vs native verify

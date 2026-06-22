@@ -117,7 +117,7 @@ These are the main engineering options; only the third is fully working on Spart
 - In **`C_core` `precommitted`:** constrain `shared[k]` to equal trace topology bytes (or to FORS/WOTS inputs derived from them).
 
 **Pros:** Keeps the intended NeutronNova split (bulk SHA in fold, glue in core).  
-**Cons (current bug):** As soon as `num_shared > 0`, our proofs fail verify (`InvalidSumcheckProof` or PCS length errors). Implemented in `FoldStepBoundCircuit` / `FoldCoreBoundCircuit`; test `fold_bound_shared` is **`#[ignore]`**. Microsoft’s `sha256_neutronnova` bench uses `shared() → []` only.
+**Status (2025-06):** **Fixed** — uniform one-hot selector in `FoldStepBoundCircuit` keeps identical R1CS shape across folded instances. `fold_bound_shared` passes. See [SHARED_WITNESS_DEBUG.md](SHARED_WITNESS_DEBUG.md).
 
 #### Option B — Fold accumulator as core inputs (“fold IO”)
 
@@ -137,7 +137,7 @@ These are the main engineering options; only the third is fully working on Spart
 
 | Option | Step + core split? | Binds step wires to glue? | Works on Spartan2 0.9.0? |
 | --- | --- | --- | --- |
-| **A** Shared witness | Yes | Yes (target) | **No** (verify bug) |
+| **A** Shared witness | Yes | Yes | **Yes** (uniform selector) |
 | **B** Fold IO → core | Yes | Yes (if API allows) | Not tried |
 | **C** Packed in `C_step` | No (core dummy) | Yes (in one circuit) | **Yes** (local chain) |
 
@@ -212,7 +212,8 @@ Bit-accurate SHA-256 compression step, `thash`, `compute_root`, WOTS+, FORS, hyp
 | NeutronNova pipeline on real PQClean trace rows | ✅ |
 | `FoldCoreChainCircuit` + `fold_local_chain` | ✅ (byte links in core only) |
 | `FoldPackedChainCircuit` / `FoldPackedCoreBoundCircuit` | ✅ sound **intra-step** chain |
-| `FoldStepBoundCircuit` + shared witness | ⚠️ implemented; `fold_bound_shared` **ignored** (Spartan2 verify) |
+| `FoldStepBoundCircuit` + shared witness | ✅ `fold_bound_shared` passes |
+| `FoldVerifyCoreCircuit` (`hash_message` increment) | ✅ `fold_verify_core_hash_message` |
 | Full trace / KAT prove | ⬜ |
 | `fold-bench` scaling | ✅ |
 
@@ -220,13 +221,13 @@ Bit-accurate SHA-256 compression step, `thash`, `compute_root`, WOTS+, FORS, hyp
 
 | Issue | Symptom / risk | Where |
 | --- | --- | --- |
-| **Split core without binding** | `FoldCoreChainCircuit` checks trace **bytes**; `FoldStepCircuit` checks compressions on **other** wires. Malicious prover can mismatch digests and still verify π. | `fold_local_chain` — intentional smoke only |
-| **Shared witness verify failure** | `num_shared > 0` → `InvalidSumcheckProof` or `rerandomize_commitment: length mismatch` | `FoldStepBoundCircuit`, `fold_bound_shared` (**`#[ignore]`**) |
+| **Split core without binding** | `FoldCoreChainCircuit` checks trace **bytes**; `FoldStepCircuit` checks compressions on **other** wires. Malicious prover can mismatch digests and still verify π. | `fold_split_step_core` — smoke only |
+| **Shared witness (resolved)** | Was: per-step conditional pins → R1CS shape mismatch → `InvalidSumcheckProof`. Fixed via uniform selector. | [SHARED_WITNESS_DEBUG.md](SHARED_WITNESS_DEBUG.md) |
 | **`h_out` pinning on step** | Explicit `h_out = Compress(...)` in fold step breaks NeutronNova verify | `synthesize_compression` vs `synthesize_compression_for_fold` — pinning avoided on purpose |
 | **Placeholder core** | `FoldCoreCircuit` is ~1 SHA block for shape equalization only; proves nothing about SPHINCS+ | Used in `fold_packed_chain`, bench |
 | **NeutronNova batch size** | Instance count padded to power of two; duplicating the last step can break **bound** chains | `pad_steps_to_power_of_two`, `longest_chain_bound` |
 | **Single step instance** | `num_steps = 1` has caused prover panics in past tests | Use ≥ 2 instances (see packed chain test) |
-| **Full verify gadget in prover** | `synthesize_verify_core` exists in `sphincs-circuit` but is **not** wired as production `C_core` yet | M2 done, M3 glue open |
+| **Full verify gadget in prover** | `synthesize_verify_core` in `sphincs-circuit`; **`FoldVerifyCoreCircuit`** ports it incrementally (`hash_message` first) | Phase 2 in progress |
 | **Oracle / intermediate_roots** | Past bug: wrong `tree` / `idx_leaf` in test oracle (fixed in tree); worth regression-testing | `verify.rs` tests |
 
 **Honest status of “we have a zk fold” today:** we can prove π for real PQClean compression rows **and** a separate core, but π does **not** yet imply a full sound SPHINCS+ verify unless you use the **packed** path for the chain fragment or fix **Option A/B**.
@@ -249,7 +250,8 @@ Bit-accurate SHA-256 compression step, `thash`, `compute_root`, WOTS+, FORS, hyp
 | `fold_local_chain` | Split + trace link bytes in core |
 | `fold_packed_chain` | Wired chain, placeholder core |
 | `fold_bound_packed_core` | Wired chain + boundary checks in step |
-| `fold_bound_shared` | `#[ignore]` — shared witness |
+| `fold_bound_shared` | ✅ shared witness + bound steps |
+| `fold_verify_core_hash_message` | 🟡 `hash_message` core increment |
 
 ```bash
 # Split step + core demo
@@ -272,8 +274,8 @@ cargo run -p sphincs-prover --features pqclean --release \
 | Phase | Status | Deliverable |
 | --- | --- | --- |
 | **0** Infrastructure | ✅ | Trace → `FoldStepCircuit`, NeutronNova setup/prove/verify, `fold-bench` |
-| **1** Sound compression topology | 🟡 | Shared binding (split) **or** scaled packed segments |
-| **2** Real `C_core` | ⬜ | Port `synthesize_verify_core` into `SpartanCircuit`; bind to folded outputs (Phase 1) |
+| **1** Sound compression topology | ✅ | Shared binding via uniform selector (`fold_bound_shared`) |
+| **2** Real `C_core` | 🟡 | `FoldVerifyCoreCircuit`: `hash_message` smoke → full `synthesize_verify_core` |
 | **3** Full trace + KAT | ⬜ | ~2k–3k compressions, PQClean KAT ZK verify |
 | **4** Hardening | ⬜ | Public IO, perf, optional length-hiding / robust params |
 
@@ -282,10 +284,10 @@ cargo run -p sphincs-prover --features pqclean --release \
 | Option | Implementation | Sound chain across instances? |
 | --- | --- | --- |
 | **C** Packed | `FoldPackedChainCircuit` / `FoldPackedCoreBoundCircuit` | ✅ per packed segment |
-| **A** Shared | `FoldStepBoundCircuit` + `FoldCoreBoundCircuit` | ✅ if Spartan2 shared works |
+| **A** Shared | `FoldStepBoundCircuit` + `FoldCoreBoundCircuit` | ✅ uniform selector |
 | **None** Split smoke | `FoldCoreChainCircuit` + plain `FoldStepCircuit` | ❌ duplicate witness bytes |
 
-**Next:** unblock **Option A** (P1); scale **Option C** for long traces; treat split smoke as demo only.
+**Done:** Option A. Scale bound folding to longer trace prefixes; treat split smoke as demo only.
 
 ### Phase 2 detail
 
@@ -301,19 +303,21 @@ Grouped by impact on a production ZK verify proof.
 
 ---
 
-### P1 — Shared witness + NeutronNova verify (**blocks Option A in §3**)
+### P1 — Shared witness + NeutronNova verify — **resolved (2025-06)**
 
-**Symptom:** `num_shared > 0` → `InvalidSumcheckProof` or `rerandomize_commitment: commitment and blinds must have the same length`.
+**Was:** `num_shared > 0` → `InvalidSumcheckProof` when per-step conditional pins produced different R1CS shapes per folded instance.
 
-**Hypotheses:** `equalize` mismatch between `S_step` and `S_core` shared columns; u32/limb bit decomposition in `shared_link.rs`; upstream Spartan2 NeutronNova only tested with `shared() → []` (Microsoft `sha256_neutronnova` bench).
+**Fix:** Uniform one-hot `step_index` selector in `FoldStepBoundCircuit`; `one_hot_select` / `enforce_cond_link_eq_u32` in `shared_link.rs`.
 
-**Tasks**
+**Done when:** `fold_bound_shared` passes — ✅.
 
-- [ ] Minimal repro: 2 steps, one shared `AllocatedNum`, trivial core.
-- [ ] Byte-identical `shared()` allocation order in step vs core circuits.
-- [ ] Spartan2 upstream issue / version bump.
+---
 
-**Done when:** `fold_bound_shared` passes; inconsistent step vs core digests are impossible.
+### P1b — Real `C_core` in prover (**current focus**)
+
+**Goal:** Port `synthesize_verify_core` into `FoldVerifyCoreCircuit` as NeutronNova `C_core`, incrementally (`hash_message` smoke test first).
+
+**Done when:** `fold_verify_core_hash_message` passes — ✅ (`hash_message` increment). Extend to full `synthesize_verify_core` + `M_MAX` padding.
 
 ---
 

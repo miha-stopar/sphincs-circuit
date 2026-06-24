@@ -2,7 +2,13 @@
 //!
 //! Incremental rollout:
 //! - [`VerifyCorePhase::HashMessage`] — `hash_message` + shared link digests (`fold_verify_core_hash_message`)
-//! - [`VerifyCorePhase::Full`] — full `synthesize_verify_core` + `enforce_message_padding` (future)
+//! - [`VerifyCorePhase::Full`] — full `synthesize_verify_core` (future)
+//!
+//! **Public `mlen` rollout:** Phase 2 smoke keeps `mlen` as a **synthesis-time constant**
+//! on the circuit struct (fixed per proof instance). The final v1 statement still has public
+//! `mlen` ([`circuit_spec::VerifyPublic`]); wiring variable public `mlen` into
+//! `hash_message_bits` (muxed preimage / trace alignment) is deferred to
+//! [`VerifyCorePhase::Full`] + Spartan public IO — see `docs/HACKMD_NEUTRONNOVA_PLAN.md` §Phase 2.
 
 use std::marker::PhantomData;
 
@@ -11,8 +17,8 @@ use circuit_spec::{MESSAGE_MAX_BYTES, SPHINCS_PK_BYTES, SPHINCS_SIG_BYTES};
 use ff::Field;
 use spartan2::traits::{circuit::SpartanCircuit, Engine};
 use sphincs_circuit::{
-    alloc_digest_shared, enforce_bytes_eq_shared, link_shared_slice, synthesize_hash_message,
-    hash_msg::SPX_DGST_BYTES, thash::SPX_N,
+    alloc_digest_shared, enforce_bytes_eq_shared, enforce_message_padding, link_shared_slice,
+    synthesize_hash_message, hash_msg::SPX_DGST_BYTES, thash::SPX_N,
 };
 
 use crate::fold::E;
@@ -36,8 +42,8 @@ pub enum VerifyCorePhase {
 pub struct FoldVerifyCoreCircuit {
     pub phase: VerifyCorePhase,
     pub pk: [u8; SPHINCS_PK_BYTES],
-    /// Message bytes hashed (`len == mlen`). Padding policy is enforced in [`VerifyCorePhase::Full`].
-    pub message: Vec<u8>,
+    /// Padded message buffer (`MESSAGE_MAX_BYTES`); only `message[0..mlen]` is hashed.
+    pub message: [u8; MESSAGE_MAX_BYTES],
     pub mlen: usize,
     /// Signature prefix `R` (`SPX_N` bytes).
     pub r: [u8; SPX_N],
@@ -51,12 +57,12 @@ pub struct FoldVerifyCoreCircuit {
 impl FoldVerifyCoreCircuit {
     pub fn hash_message(
         pk: [u8; SPHINCS_PK_BYTES],
-        message: Vec<u8>,
+        message: [u8; MESSAGE_MAX_BYTES],
+        mlen: usize,
         r: [u8; SPX_N],
         hm_mgf: [u8; SPX_DGST_BYTES],
         link_digests: Vec<[u8; 32]>,
     ) -> Self {
-        let mlen = message.len();
         assert!(mlen <= MESSAGE_MAX_BYTES);
         Self {
             phase: VerifyCorePhase::HashMessage,
@@ -114,6 +120,11 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
         match self.phase {
             VerifyCorePhase::HashMessage => {
+                enforce_message_padding(
+                    cs.namespace(|| "msg_pad"),
+                    &self.message,
+                    self.mlen,
+                )?;
                 synthesize_hash_message(
                     cs.namespace(|| "hash_message"),
                     &self.r,
@@ -157,7 +168,15 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
     }
 }
 
-/// Build message bytes for verify-core smoke tests (exact length, no tail padding).
+/// Build `MESSAGE_MAX_BYTES` buffer with zero tail (v1 padded-message policy).
+pub fn padded_message(msg: &[u8]) -> ([u8; MESSAGE_MAX_BYTES], usize) {
+    assert!(msg.len() <= MESSAGE_MAX_BYTES);
+    let mut padded = [0u8; MESSAGE_MAX_BYTES];
+    padded[..msg.len()].copy_from_slice(msg);
+    (padded, msg.len())
+}
+
+/// Exact-length message (no tail buffer). Prefer [`padded_message`] for verify-core circuits.
 pub fn message_bytes(msg: &[u8]) -> Vec<u8> {
     assert!(msg.len() <= MESSAGE_MAX_BYTES);
     msg.to_vec()

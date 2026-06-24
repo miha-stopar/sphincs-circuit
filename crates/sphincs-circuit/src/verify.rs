@@ -64,8 +64,38 @@ fn copy_subtree_addr(from: &[u8; ADDR_BYTES]) -> [u8; ADDR_BYTES] {
     a
 }
 
-/// Enforce inactive message suffix bytes are zero (padded-message policy).
+/// Enforce the inactive message suffix `message[mlen..]` is all zero **at synthesis time**.
+///
+/// `hash_message_bits` only allocates witness for `message[0..mlen]`; tail bytes are not part of
+/// the R1CS witness. When the circuit is built from a PQClean trace (or any honest setup), the
+/// buffer tail must already be zero — this function checks that without adding ~`(M_MAX - mlen)`
+/// boolean constraints (which breaks NeutronNova `C_core` witness layout when `M_MAX` is large).
+///
+/// Soundness: with public `mlen`, the relation only hashes `message[0..mlen]`; inactive bytes are
+/// not witness and cannot be chosen by a malicious prover.
 pub fn enforce_message_padding<Scalar, CS>(
+    _cs: CS,
+    message: &[u8],
+    mlen: usize,
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert!(message.len() >= mlen);
+    for i in mlen..message.len().min(MESSAGE_MAX_BYTES) {
+        if message[i] != 0 {
+            return Err(SynthesisError::AssignmentMissing);
+        }
+    }
+    Ok(())
+}
+
+/// Per-byte R1CS padding: `(pad_bit[i] == 0)` for each inactive byte witness.
+///
+/// Only use when inactive message bytes are allocated as witness (not the default `hash_message`
+/// path). Avoid on NeutronNova `C_core` at `M_MAX` scale — use [`enforce_message_padding`] instead.
+pub fn enforce_message_padding_witness<Scalar, CS>(
     mut cs: CS,
     message: &[u8],
     mlen: usize,
@@ -77,7 +107,6 @@ where
     assert!(message.len() >= mlen);
     for i in mlen..message.len().min(MESSAGE_MAX_BYTES) {
         let bit = Boolean::constant(message[i] == 0);
-        // Allocate witness bit equal to constant 0 — catches prover tampering.
         let witness = bellpepper::gadgets::boolean::AllocatedBit::alloc(
             cs.namespace(|| format!("pad_{i}")),
             Some(false),
@@ -95,6 +124,10 @@ where
 /// are satisfied. `intermediate_roots` supplies the 16-byte root before each
 /// hypertree layer (index 0 = FORS pk, 1..=7 = output of previous layer) for
 /// WOTS `chain_lengths` structure at synthesis time.
+///
+/// **Trusted witness prep:** `hm_expected` fields are not yet parsed from `hm_mgf`
+/// in-circuit; `intermediate_roots` fix WOTS topology — see `docs/CIRCUIT.md`
+/// §Synthesis-time hints.
 #[allow(clippy::too_many_arguments)]
 pub fn synthesize_verify_core<Scalar, CS>(
     mut cs: CS,
@@ -350,6 +383,34 @@ mod tests {
             &roots,
         )
         .expect("synth");
+        assert!(cs.is_satisfied());
+    }
+
+    #[test]
+    fn message_padding_rejects_nonzero_tail_at_synthesis() {
+        let mut padded = [0u8; MESSAGE_MAX_BYTES];
+        padded[0] = 1;
+        padded[10] = 2; // nonzero in inactive region when mlen=5
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let err = enforce_message_padding(&mut cs, &padded, 5).unwrap_err();
+        assert!(matches!(err, SynthesisError::AssignmentMissing));
+    }
+
+    #[test]
+    fn message_padding_mgf_padded_buffer_satisfies() {
+        let r = [0x11u8; 16];
+        let pk = [0x22u8; 32];
+        let msg = b"padded buffer hash_message";
+        let mlen = msg.len();
+        let (padded, _) = {
+            let mut buf = [0u8; MESSAGE_MAX_BYTES];
+            buf[..mlen].copy_from_slice(msg);
+            (buf, mlen)
+        };
+        let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        enforce_message_padding(&mut cs, &padded, mlen).expect("pad");
+        synthesize_hash_message(&mut cs, &r, &pk, &padded, mlen, &hm_mgf).expect("hm");
         assert!(cs.is_satisfied());
     }
 }

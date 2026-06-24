@@ -37,6 +37,11 @@ fn addr_with_type(base: &[u8; ADDR_BYTES], ty: u8) -> [u8; ADDR_BYTES] {
 /// `root_in_bytes` supplies the 16-byte message for WOTS `chain_lengths` (fixed at
 /// synthesis time). When composing layers, pass the previous layer's output bits
 /// as `root_in_bits` and enforce they match `root_in_bytes`.
+///
+/// **Trusted-hint caveat:** `chain_lengths(root_in_bytes)` fixes how many `gen_chain`
+/// steps are synthesized; witness `root_in_bits` is tied to those bytes via
+/// `enforce_bits_equal_bytes`. Production should derive lengths from witness or
+/// max-unroll — see `docs/CIRCUIT.md` §Synthesis-time hints.
 #[allow(clippy::too_many_arguments)]
 pub fn hypertree_layer_from_root_bits<Scalar, CS>(
     mut cs: CS,

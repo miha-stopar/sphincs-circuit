@@ -144,7 +144,7 @@ NeutronNova in Spartan2 keeps **two constraint systems** and merges them only in
 | Core | `C_core` ([`FoldCoreChainCircuit`](../crates/sphincs-prover/src/core.rs), etc.) | `S_core` | Glue you put in core `precommitted` / `synthesize` (e.g. `h_out[i] == h_in[j]` as **witness bytes**) |
 | Fold | NIFS on step instances only | — | `U_fold, W_fold` = accumulated step instances |
 
-**Setup:** synthesize `S_step` from a step prototype, `S_core` from a core prototype, then `SplitR1CSShape::equalize` so both use the same witness **segment sizes** (`num_shared`, `num_precommitted`, `num_rest`). The matrices are still different.
+**Setup:** synthesize `S_step` from a step prototype, `S_core` from a core prototype, then `SplitR1CSShape::equalize` so both have the **same total witness dimension** and constraint row count. Segment widths (`num_shared`, `num_precommitted`) may still differ per side — only `num_rest` grows on the shorter circuit. Matrices `A,B,C` remain different.
 
 **Prep / prove witness layout** (see `NeutronNovaZkSNARK::prep_prove` / `prove` in Spartan2):
 

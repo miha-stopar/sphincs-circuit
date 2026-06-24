@@ -171,7 +171,7 @@ cargo test -p sphincs-prover --features pqclean \
 
 ## 4. Spartan2 prove pipeline
 
-Two shapes: `S_step`, `S_core`, then `SplitR1CSShape::equalize` (same witness **segment sizes**, different constraint matrices).
+Two shapes: `S_step`, `S_core`, then `SplitR1CSShape::equalize` (same **total** witness length and row count; segment boundaries may differ — see [SHARED_WITNESS_DEBUG.md](SHARED_WITNESS_DEBUG.md)).
 
 | Phase | What runs |
 | --- | --- |
@@ -228,7 +228,8 @@ Bit-accurate SHA-256 compression step, `thash`, `compute_root`, WOTS+, FORS, hyp
 | **NeutronNova batch size** | Instance count padded to power of two; duplicating the last step can break **bound** chains | `pad_steps_to_power_of_two`, `longest_chain_bound` |
 | **Single step instance** | `num_steps = 1` has caused prover panics in past tests | Use ≥ 2 instances (see packed chain test) |
 | **Full verify gadget in prover** | `synthesize_verify_core` in `sphincs-circuit`; **`FoldVerifyCoreCircuit`** ports it incrementally (`hash_message` first) | Phase 2 in progress |
-| **Oracle / intermediate_roots** | Past bug: wrong `tree` / `idx_leaf` in test oracle (fixed in tree); worth regression-testing | `verify.rs` tests |
+| **Oracle / intermediate_roots** | `intermediate_roots` + `root_in_bytes` fix WOTS `chain_lengths` topology at synthesis; witness roots tied via `enforce_bits_equal_bytes` — see [CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints | `hypertree.rs`, `verify.rs` |
+| **`hm_expected` vs `hm_mgf`** | Only raw MGF1 enforced in-circuit; `tree` / `leaf_idx` / `mhash` still from trusted `hm_expected` — see [CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints | `verify.rs`, `hash_msg.rs` |
 
 **Honest status of “we have a zk fold” today:** we can prove π for real PQClean compression rows **and** a separate core, but π does **not** yet imply a full sound SPHINCS+ verify unless you use the **packed** path for the chain fragment or fix **Option A/B**.
 
@@ -295,6 +296,16 @@ cargo run -p sphincs-prover --features pqclean --release \
 - **Indices, FORS, WOTS+, hypertree, root** live in `C_core`.
 - Logical arrow “folded compressions → chain glue” must become **Option A or B** (§3)—not a second copy of digests in core.
 
+**`mlen` / public IO — staged rollout**
+
+| Stage | `mlen` in circuit | `hash_message` | Public Spartan IO |
+| --- | --- | --- | --- |
+| **2a (now)** — `VerifyCorePhase::HashMessage` smoke | Synthesis-time constant on `FoldVerifyCoreCircuit` (fixed per proof instance) | `hash_message_bits` slices `message[..mlen]` at circuit build time | Dummy `public_values` (placeholder) |
+| **2b** — `VerifyCorePhase::Full` | Same fixed `mlen` per instance OK for KATs / benchmarks | Full `synthesize_verify_core` + trace must match that `mlen` | Begin wiring `PK`, padded `M`, `mlen` via `inputize` |
+| **2c** — production v1 | **Public** `mlen` scalar (`VerifyPublic`) | Variable-length preimage (mux or incremental SHA) + compression count `2 + ⌈mlen/64⌉` aligned to trace | Verifier checks `(PK, M, mlen)`; padding off-circuit or on public `M` |
+
+Do **not** block Phase 2a/2b on variable public `mlen` — fixed-`mlen` proofs are sufficient for `fold_verify_core_hash_message` and full-core KATs. Variable public `mlen` is required only when the outer Spartan statement must accept different message lengths in **one** universal circuit.
+
 ---
 
 ## 7. Open problems
@@ -317,7 +328,7 @@ Grouped by impact on a production ZK verify proof.
 
 **Goal:** Port `synthesize_verify_core` into `FoldVerifyCoreCircuit` as NeutronNova `C_core`, incrementally (`hash_message` smoke test first).
 
-**Done when:** `fold_verify_core_hash_message` passes — ✅ (`hash_message` increment). Extend to full `synthesize_verify_core` + `M_MAX` padding.
+**Done when:** `fold_verify_core_hash_message` passes — ✅ (`hash_message` increment). Extend to full `synthesize_verify_core` + `M_MAX` padding policy (synthesis-time zero tail for now; public `M`/`mlen` per §Phase 2 table later).
 
 ---
 

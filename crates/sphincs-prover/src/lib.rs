@@ -29,7 +29,7 @@ pub use bound::{
     bound_steps_from_inputs, FoldCoreBoundCircuit, FoldPackedCoreBoundCircuit, FoldStepBoundCircuit,
 };
 pub use core::{FoldCoreChainCircuit, FoldCoreCircuit};
-pub use verify_core::{FoldVerifyCoreCircuit, VerifyCorePhase, message_bytes, sig_r};
+pub use verify_core::{FoldVerifyCoreCircuit, VerifyCorePhase, message_bytes, padded_message, sig_r};
 pub use fold::{
     fold_and_prove, fold_prove_verify_timed, setup, setup_with_default_core, setup_with_proto,
     verify_proof, FoldProof, FoldProverKey, FoldStepCircuit, FoldVerifierKey, ProveTimings,

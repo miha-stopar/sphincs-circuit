@@ -249,7 +249,7 @@ z_step = [ W_shared | W_precommitted | W_rest | 1 | public_values ]
            24 scalars  ~26k compress gadget aux (same WIDTH every instance)
 ```
 
-`SplitR1CSShape::equalize(S_step, S_core)` pads the **smaller** shape so step and core share the same `num_shared`, `num_precommitted`, `num_rest` **counts** (matrices still differ).
+`SplitR1CSShape::equalize(S_step, S_core)` pads the **smaller** relation so step and core matrices have the **same total witness dimension** (`num_shared + num_precommitted + num_rest`) and the same number of constraint rows. It grows **`num_rest`** (dummy tail variables) on the shorter side; **`num_shared` and `num_precommitted` per side are unchanged** — only the combined length matches. Matrices `A,B,C` still differ (different constraints); column indices for public IO are shifted accordingly.
 
 **Prototype rule:** every folded step instance must synthesize the **same** constraint structure in `precommitted()` referencing the **same** witness columns, or non-prototype instances will not satisfy `S_step` and NIFS will fold bad witnesses.
 
@@ -286,6 +286,24 @@ For each `step_circuits[i]` (parallel):
 | All steps | same: `pos` one-hot + mux all links + compress + conditional IN/OUT bind |
 
 Per-instance witnesses differ (`pos`, `block`, `h_in` values), but the R1CS **shape** is identical.
+
+### Core padding bug (`enforce_message_padding` witness bloat)
+
+**Symptom:** `FoldVerifyCoreCircuit` + old per-byte padding → `core: FAIL — UnSat`; without padding, core OK.
+
+**Cause:** Old `enforce_message_padding` allocated ~`(M_MAX - mlen)` private `AllocatedBit`s in `C_core.precommitted()` that were **not** part of `hash_message_bits` (which only allocates `M[0..mlen]`). Those slots still occupied `W_precommitted` indices and R1CS columns. Combined with a different `num_precommitted` than the step prototype expected after `equalize`, witness assignment no longer satisfied `A·z ∘ B·z = C·z`.
+
+**Fix:** Synthesis-time zero tail check only ([`verify.rs`](../crates/sphincs-circuit/src/verify.rs)); per-byte witness padding preserved as `enforce_message_padding_witness` for other paths.
+
+```text
+C_step W:  [ shared(24) | precommitted_step(~26k compress) | rest_pad | 1 | pub ]
+C_core W:  [ shared(24) | precommitted_core(hash+…)       | rest_pad | 1 | pub ]
+             ^^^^^^^^^^^   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+             same commit   DIFFERENT width & meaning per circuit
+
+equalize:  len(W_step) == len(W_core)  by growing num_rest on the shorter side
+           (num_precommitted_step ≠ num_precommitted_core is normal)
+```
 
 ### Phase 3 — matvec cache (`prep_prove`)
 

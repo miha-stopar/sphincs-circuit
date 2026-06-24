@@ -2,8 +2,12 @@
 //! hypertree indices from `R ‖ PK ‖ M`, mirroring PQClean `hash_sha2.c`.
 //!
 //! This is the only verify sub-gadget whose SHA-256 work grows with `|M|`
-//! (in 64-byte steps). The circuit takes `mlen` as a synthesis-time constant
-//! (public in the relation) and hashes exactly `R(16) ‖ pk(32) ‖ M[0..mlen]`.
+//! (in 64-byte steps). Today `mlen` is a **synthesis-time constant** on the circuit
+//! struct: the gadget hashes exactly `R(16) ‖ pk(32) ‖ M[0..mlen]` and the compression
+//! trace must match that fixed length. The v1 **relation** still exposes public `mlen`
+//! ([`circuit_spec::VerifyPublic`]); variable public `mlen` (runtime public input +
+//! muxed SHA preimage) lands in Phase 2 `Full` / final Spartan IO — not in the current
+//! `FoldVerifyCoreCircuit` smoke path. See `docs/HACKMD_NEUTRONNOVA_PLAN.md` §Phase 2.
 
 use crate::fors::SPX_FORS_MSG_BYTES;
 use crate::thash::{alloc_input_bits, enforce_bits_equal_bytes, SPX_N};
@@ -27,6 +31,11 @@ pub const SPX_LEAF_BYTES: usize = 2;
 pub const SPX_DGST_BYTES: usize = SPX_FORS_MSG_BYTES + SPX_TREE_BYTES + SPX_LEAF_BYTES;
 
 /// Outputs of `hash_message`.
+///
+/// In `synthesize_verify_core`, only the raw MGF1 bytes (`hm_mgf`) are enforced
+/// in-circuit today; `mhash` / `tree` / `leaf_idx` should match `parse_mgf_output(hm_mgf)`
+/// but are still passed separately as synthesis-time hints — see `docs/CIRCUIT.md`
+/// §Synthesis-time hints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HashMessageOutput {
     pub mhash: [u8; SPX_FORS_MSG_BYTES],

@@ -5,7 +5,7 @@
 use circuit_spec::Sha256Compression;
 use sphincs_circuit::hash_message_mgf_buf;
 use sphincs_prover::{
-    fold_and_prove, longest_chain_bound, message_bytes, setup_with_proto, sig_r, verify_proof,
+    fold_and_prove, longest_chain_bound, padded_message, setup_with_proto, sig_r, verify_proof,
     FoldVerifyCoreCircuit,
 };
 use sphincs_ref::{sign_deterministic, verify_with_trace, CRYPTO_SEEDBYTES};
@@ -45,12 +45,11 @@ fn fold_verify_core_hash_message_smoke() {
         longest_chain_bound(&rows, n).expect("local chain with power-of-two prefix");
     let digests: Vec<_> = links.iter().map(|(left, _)| *left).collect();
 
-    let message = message_bytes(msg);
-    let mlen = message.len();
+    let (message, mlen) = padded_message(msg);
     let r = sig_r(&sig);
     let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
 
-    let core = FoldVerifyCoreCircuit::hash_message(pk, message, r, hm_mgf, digests);
+    let core = FoldVerifyCoreCircuit::hash_message(pk, message, mlen, r, hm_mgf, digests);
 
     eprintln!(
         "verify-core smoke: steps={n} links={} trace indices {}..={}",
@@ -71,11 +70,10 @@ fn fold_verify_core_hash_message_plain_steps() {
     let msg = b"verify core plain steps";
     let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
 
-    let message = message_bytes(msg);
-    let mlen = message.len();
+    let (message, mlen) = padded_message(msg);
     let r = sig_r(&sig);
     let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
-    let core = FoldVerifyCoreCircuit::hash_message(pk, message, r, hm_mgf, vec![]);
+    let core = FoldVerifyCoreCircuit::hash_message(pk, message, mlen, r, hm_mgf, vec![]);
 
     use sphincs_prover::{fold_steps_prefix, pad_steps_to_power_of_two, setup_with_proto, FoldStepCircuit};
     let trace = verify_with_trace(&pk, msg, &sig).expect("trace");

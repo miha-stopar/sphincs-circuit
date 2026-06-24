@@ -165,7 +165,9 @@ No trusted setup. Groth16 not used.
 - [x] Bind core link witnesses to per-instance folded step wires — uniform selector in [`FoldStepBoundCircuit`](../crates/sphincs-prover/src/bound.rs); `fold_bound_shared` passes (see [SHARED_WITNESS_DEBUG.md](SHARED_WITNESS_DEBUG.md))
 - [x] Fold prefix of full trace (`fold_trace_batch`: 8 steps CI, 32 ignored)
 - [x] Real `C_core` in prover — [`FoldVerifyCoreCircuit`](../crates/sphincs-prover/src/verify_core.rs): `hash_message` smoke passes (`fold_verify_core_hash_message`); full `synthesize_verify_core` next
+- [ ] Public `mlen` in Spartan IO — **deferred:** smoke/full-core KATs use fixed `mlen` per circuit instance; variable public `mlen` + trace alignment in final v1 IO (see [HACKMD_NEUTRONNOVA_PLAN.md](HACKMD_NEUTRONNOVA_PLAN.md) §Phase 2 `mlen` table)
 - [ ] Spartan2 proof of full verify on KAT (~all trace compressions)
+- [ ] Close synthesis-time hint gaps — [CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints (`hm_expected` parse, `chain_lengths` from witness, public `M`/`mlen`)
 - [x] Bench harness: `cargo run -p sphincs-prover --features pqclean --release --bin fold-bench -- N`
 - [ ] Benchmark: full trace prove/verify vs native verify
 

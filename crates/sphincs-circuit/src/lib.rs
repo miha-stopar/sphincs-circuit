@@ -50,6 +50,7 @@ pub use thash::{
 };
 pub use verify::synthesize_verify_core;
 pub use verify::enforce_message_padding;
+pub use verify::enforce_message_padding_witness;
 pub use witness::{
     local_chain_segments, step_input_from_row, trace_stats, witness_from_compressions,
     LocalChain, TraceStats,

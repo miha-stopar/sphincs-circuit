@@ -1,5 +1,5 @@
 //! Top-level SPHINCS+ verify core — composes all M2 gadgets into the PQClean
-//! `crypto_sign_verify` pipeline (minus `hash_message` padding policy):
+//! `crypto_sign_verify` pipeline:
 //!
 //! ```text
 //! hash_message(R, PK, M) → mhash, tree, idx_leaf
@@ -8,9 +8,24 @@
 //!     wots_pk_from_sig → thash(leaf) → compute_root → root
 //! root == PK.root
 //! ```
+//!
+//! # NeutronNova integration
+//!
+//! Wrapped by [`sphincs_prover::FoldVerifyCoreCircuit`] (`VerifyCorePhase::Full`) as `C_core`.
+//! See **`docs/VERIFY_CORE.md`** for the prover adapter, tests, and staged rollout.
+//!
+//! # Phase 2c — `hm_mgf` only (no `hm_expected`)
+//!
+//! [`synthesize_verify_core`] takes a single 30-byte **`hm_mgf`** witness. [`synthesize_hash_message_parsed`]
+//! enforces `mgf_bits == hm_mgf` and returns `mhash` / `tree` / `leaf_idx` by reading those witness
+//! bits at synthesis time ([`hash_message_output_from_mgf_bits`]). There is no separate trusted
+//! `hm_expected` parameter.
+//!
+//! **Remaining trusted hint:** [`intermediate_roots`] (WOTS `chain_lengths` topology) — see
+//! `docs/CIRCUIT.md` §Synthesis-time hints.
 
-use crate::fors::{fors_pk_from_sig_bits, SPX_FORS_BYTES, SPX_FORS_MSG_BYTES};
-use crate::hash_msg::{synthesize_hash_message, HashMessageOutput, SPX_DGST_BYTES, SPX_PK_BYTES};
+use crate::fors::{fors_pk_from_sig_bits, SPX_FORS_BYTES};
+use crate::hash_msg::{synthesize_hash_message_parsed, SPX_DGST_BYTES, SPX_PK_BYTES};
 use crate::hypertree::{hypertree_layer_from_root_bits, SPX_TREE_AUTH_BYTES, SPX_TREE_HEIGHT};
 use crate::thash::{enforce_bits_equal_bytes, ADDR_BYTES, SPX_N};
 use crate::wots::SPX_WOTS_BYTES;
@@ -125,9 +140,16 @@ where
 /// hypertree layer (index 0 = FORS pk, 1..=7 = output of previous layer) for
 /// WOTS `chain_lengths` structure at synthesis time.
 ///
-/// **Trusted witness prep:** `hm_expected` fields are not yet parsed from `hm_mgf`
-/// in-circuit; `intermediate_roots` fix WOTS topology — see `docs/CIRCUIT.md`
-/// §Synthesis-time hints.
+/// `mhash` / `tree` / `leaf_idx` are derived from witness `mgf_bits` via
+/// [`synthesize_hash_message_parsed`] (not a separate trusted parameter).
+///
+/// **Trusted witness prep (remaining):** [`intermediate_roots`] — see `docs/CIRCUIT.md`.
+///
+/// # Parameters
+///
+/// - `hm_mgf` — raw 30-byte MGF1 output; enforced in R1CS (`mgf_bits == hm_mgf`). Parsed fields
+///   used downstream come from these witness bits via [`synthesize_hash_message_parsed`].
+/// - `intermediate_roots` — trusted synthesis hint for WOTS `chain_lengths` per hypertree layer.
 #[allow(clippy::too_many_arguments)]
 pub fn synthesize_verify_core<Scalar, CS>(
     mut cs: CS,
@@ -135,7 +157,6 @@ pub fn synthesize_verify_core<Scalar, CS>(
     message: &[u8],
     mlen: usize,
     signature: &[u8; SPHINCS_SIG_BYTES],
-    hm_expected: &HashMessageOutput,
     hm_mgf: &[u8; SPX_DGST_BYTES],
     intermediate_roots: &[[u8; SPX_N]; SPX_D],
 ) -> Result<(), SynthesisError>
@@ -165,8 +186,8 @@ where
     let mut pk32 = [0u8; SPX_PK_BYTES];
     pk32.copy_from_slice(pk);
 
-    // 1. hash_message
-    synthesize_hash_message(
+    // 1. hash_message — derive mhash / tree / leaf_idx from witness mgf_bits (no hm_expected param).
+    let hm = synthesize_hash_message_parsed(
         cs.namespace(|| "hash_message"),
         &r,
         &pk32,
@@ -175,8 +196,8 @@ where
         hm_mgf,
     )?;
 
-    let mut tree = hm_expected.tree;
-    let mut idx_leaf = hm_expected.leaf_idx;
+    let mut tree = hm.tree;
+    let mut idx_leaf = hm.leaf_idx;
 
     // 2. fors_pk_from_sig
     let mut fors_addr = [0u8; ADDR_BYTES];
@@ -187,8 +208,7 @@ where
     let mut fors_sig = [0u8; SPX_FORS_BYTES];
     fors_sig.copy_from_slice(&signature[SIG_R_BYTES..SIG_AFTER_FORS]);
 
-    let mut mhash = [0u8; SPX_FORS_MSG_BYTES];
-    mhash.copy_from_slice(&hm_expected.mhash);
+    let mhash = hm.mhash;
 
     let fors_pk_bits = fors_pk_from_sig_bits(
         cs.namespace(|| "fors"),
@@ -347,6 +367,42 @@ mod tests {
         roots
     }
 
+    /// Phase 2c regression: corrupt `hm_mgf` must fail `mgf_bits == hm_mgf` (fast — hash_message only).
+    ///
+    /// ```bash
+    /// cargo test -p sphincs-circuit wrong_hm_mgf_unsatisfies_parsed_hash_message
+    /// ```
+    #[test]
+    fn wrong_hm_mgf_unsatisfies_parsed_hash_message() {
+        let seed = [7u8; CRYPTO_SEEDBYTES];
+        let msg = b"wrong mgf must fail";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+        let r = {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&sig[..16]);
+            a
+        };
+        let mut hm_mgf = hash_message_mgf_buf(&r, &pk, msg, msg.len());
+        hm_mgf[0] ^= 0xff;
+
+        let mut padded = vec![0u8; MESSAGE_MAX_BYTES];
+        padded[..msg.len()].copy_from_slice(msg);
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        enforce_message_padding(&mut cs, &padded, msg.len()).expect("pad");
+        synthesize_hash_message_parsed(&mut cs, &r, &pk, &padded, msg.len(), &hm_mgf)
+            .expect("synth");
+        assert!(!cs.is_satisfied(), "corrupt hm_mgf must break mgf_bits == hm_mgf");
+    }
+
+    /// Full M2 verify core R1CS on a PQClean KAT signature (slow).
+    ///
+    /// Inputs: `hm_mgf` only (Phase 2c — no separate `hm_expected`). `intermediate_roots` from
+    /// [`intermediate_roots_oracle`] using `parse_mgf_output(hm_mgf)` for tree/leaf indices.
+    ///
+    /// ```bash
+    /// cargo test -p sphincs-circuit valid_signature_satisfies_core --release -- --ignored --nocapture
+    /// ```
     #[test]
     #[ignore = "full verify core is slow in debug (~hours); run with --release --ignored"]
     fn valid_signature_satisfies_core() {
@@ -378,7 +434,6 @@ mod tests {
             &padded,
             msg.len(),
             &sig,
-            &hm,
             &hm_mgf,
             &roots,
         )
@@ -410,7 +465,7 @@ mod tests {
         let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
         let mut cs = TestConstraintSystem::<Fr>::new();
         enforce_message_padding(&mut cs, &padded, mlen).expect("pad");
-        synthesize_hash_message(&mut cs, &r, &pk, &padded, mlen, &hm_mgf).expect("hm");
+        synthesize_hash_message_parsed(&mut cs, &r, &pk, &padded, mlen, &hm_mgf).expect("hm");
         assert!(cs.is_satisfied());
     }
 }

@@ -295,6 +295,27 @@ Per-instance witnesses differ (`pos`, `block`, `h_in` values), but the R1CS **sh
 
 **Fix:** Synthesis-time zero tail check only ([`verify.rs`](../crates/sphincs-circuit/src/verify.rs)); per-byte witness padding preserved as `enforce_message_padding_witness` for other paths.
 
+### Phase 2c — `hm_expected` removed from `FoldVerifyCoreCircuit`
+
+**Before:** `FoldVerifyCoreCircuit::full` took both `hm_mgf` (enforced in R1CS) and a separate
+`hm_expected { mhash, tree, leaf_idx }` used as Rust constants for FORS/hypertree addresses. A
+malicious witness generator could pass inconsistent values if only `hm_mgf` was checked.
+
+**After:** [`synthesize_hash_message_parsed`](../crates/sphincs-circuit/src/hash_msg.rs) enforces
+`mgf_bits == hm_mgf` and parses tree/leaf/mhash from those witness bits at synthesis time. The
+circuit struct has **no** `hm_expected` field. [`fold_verify_core_from_pqclean`](../crates/sphincs-prover/src/verify_witness.rs) uses [`parse_mgf_output`](../crates/sphincs-circuit/src/hash_msg.rs) on native `hm_mgf` only for `intermediate_roots_oracle` replay.
+
+**Still trusted:** `intermediate_roots` (WOTS `chain_lengths` topology). Address bytes are still
+synthesis-time `u64`/`u32` from parsed mgf witness — not in-circuit bit mux. See
+[CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints and [VERIFY_CORE.md](VERIFY_CORE.md).
+
+**Tests:**
+
+```bash
+cargo test -p sphincs-circuit parsed_output_matches_native
+cargo test -p sphincs-circuit wrong_hm_mgf_unsatisfies_parsed_hash_message
+```
+
 ```text
 C_step W:  [ shared(24) | precommitted_step(~26k compress) | rest_pad | 1 | pub ]
 C_core W:  [ shared(24) | precommitted_core(hash+…)       | rest_pad | 1 | pub ]

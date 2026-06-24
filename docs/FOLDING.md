@@ -177,7 +177,7 @@ sequenceDiagram
 
 - [`fold_local_chain`](../crates/sphincs-prover/tests/fold_local_chain.rs): `N` × [`FoldStepCircuit`] + [`FoldCoreChainCircuit`] with trace link bytes in the core. Folding constraints and core constraints appear together in **one verified proof**, but core link equalities use **their own** allocated bytes, not the compression output wires from step instances (`shared()` is empty). A malicious prover could satisfy each side with inconsistent digests. **Smoke only — not sound.**
 - **Sound split binding (Option A):** [`FoldStepBoundCircuit`] + [`FoldCoreBoundCircuit`] allocate link digests in [`SpartanCircuit::shared`]; steps pin compressions to `shared[k]` via a uniform one-hot selector; core checks `shared[k]` against trace topology. Verify passes — test `fold_bound_shared` (see [SHARED_WITNESS_DEBUG.md](SHARED_WITNESS_DEBUG.md)).
-- **Phase 2 (in progress):** [`FoldVerifyCoreCircuit`] ports real SPHINCS+ glue (`hash_message` first, then full `synthesize_verify_core`) into `C_core` alongside folded steps.
+- **Phase 2:** [`FoldVerifyCoreCircuit`] — Phase 2a `hash_message` ✅ CI; Phase 2b full [`synthesize_verify_core`] ✅ setup (`#[ignore]` release). See [VERIFY_CORE.md](VERIFY_CORE.md).
 - **Workaround (packed):** [`FoldPackedCoreBoundCircuit`] puts step + boundary glue in one `C_step` instance; the NeutronNova core stays a shape placeholder ([`FoldCoreCircuit`]).
 
 **Mental model:** “Combined with folding” means the **verifier checks one NeutronNova proof** whose sum-check simultaneously attests to the **folded step relation** and the **core relation**. Cryptographic **binding** between them is a separate engineering step (shared witness or future fold IO), not a consequence of using the same `fold_and_prove` API.

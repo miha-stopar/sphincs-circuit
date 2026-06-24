@@ -63,6 +63,16 @@ name = "fold_trace_batch"
 path = "tests/fold_trace_batch.rs"
 required-features = ["pqclean"]
 
+[[test]]
+name = "fold_verify_core_hash_message"
+path = "tests/fold_verify_core_hash_message.rs"
+required-features = ["pqclean"]
+
+[[test]]
+name = "fold_verify_core_full"
+path = "tests/fold_verify_core_full.rs"
+required-features = ["pqclean"]
+
 [[bin]]
 name = "fold-bench"
 path = "src/bin/fold_bench.rs"

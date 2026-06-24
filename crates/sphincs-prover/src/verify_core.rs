@@ -1,14 +1,44 @@
 //! Real SPHINCS+ verify glue as NeutronNova **`C_core`** (Phase 2).
 //!
-//! Incremental rollout:
-//! - [`VerifyCorePhase::HashMessage`] — `hash_message` + shared link digests (`fold_verify_core_hash_message`)
-//! - [`VerifyCorePhase::Full`] — full `synthesize_verify_core` (future)
+//! # Why this module exists
 //!
-//! **Public `mlen` rollout:** Phase 2 smoke keeps `mlen` as a **synthesis-time constant**
-//! on the circuit struct (fixed per proof instance). The final v1 statement still has public
-//! `mlen` ([`circuit_spec::VerifyPublic`]); wiring variable public `mlen` into
-//! `hash_message_bits` (muxed preimage / trace alignment) is deferred to
-//! [`VerifyCorePhase::Full`] + Spartan public IO — see `docs/HACKMD_NEUTRONNOVA_PLAN.md` §Phase 2.
+//! M2 arithmetized PQClean `crypto_sign_verify` in `sphincs-circuit` as
+//! [`synthesize_verify_core`]. NeutronNova requires a separate [`SpartanCircuit`] for the
+//! **core** relation (`C_core`). This module is that adapter: it runs the M2 gadgets inside
+//! `precommitted()` so they share the same witness layout conventions as
+//! [`super::FoldStepBoundCircuit`] (shared link digests + precommitted gadget aux).
+//!
+//! Full design write-up: **`docs/VERIFY_CORE.md`**.
+//!
+//! # Incremental rollout (`VerifyCorePhase`)
+//!
+//! | Phase | Constructor | `precommitted()` synthesizes | Test |
+//! |-------|-------------|------------------------------|------|
+//! | **2a** | [`FoldVerifyCoreCircuit::hash_message`] | `hash_message` + link checks only | `fold_verify_core_hash_message` (CI) |
+//! | **2b** | [`FoldVerifyCoreCircuit::full`] | Full [`synthesize_verify_core`] | `fold_verify_core_full_*` (`#[ignore]`, release) |
+//! | **2c** | [`FoldVerifyCoreCircuit::full`] (no `hm_expected`) | `mhash`/`tree`/`leaf` from witness `mgf_bits`; public IO TBD | `parsed_output_matches_native`, `wrong_hm_mgf_*` (CI) |
+//!
+//! # SpartanCircuit layout
+//!
+//! ```text
+//! shared()       → link_digests[k] as field elements (must match FoldStepBoundCircuit)
+//! precommitted() → phase gadget + enforce_bytes_eq_shared per link + inputize core_x
+//! synthesize()   → (empty — constraints live in precommitted, like FoldStepCircuit)
+//! public_values()→ [0] placeholder until Phase 2c
+//! ```
+//!
+//! # Message / padding
+//!
+//! - `message` is `[u8; MESSAGE_MAX_BYTES]` with zero tail; only `message[0..mlen]` is hashed.
+//! - [`enforce_message_padding`] is a **synthesis-time** zero-tail check (no ~4k orphan
+//!   `AllocatedBit`s — that broke NeutronNova `C_core` layout; see `SHARED_WITNESS_DEBUG.md`).
+//! - `mlen` is a **synthesis-time constant** on the struct (fixed per proof instance). Variable
+//!   public `mlen` is Phase 2c — see `docs/HACKMD_NEUTRONNOVA_PLAN.md` §Phase 2.
+//!
+//! # Phase Full — remaining witness hints
+//!
+//! [`VerifyCorePhase::Full`] still needs `intermediate_roots` at synthesis time (WOTS topology).
+//! `mhash` / `tree` / `leaf_idx` are derived in-circuit from `hm_mgf` — not a separate field.
 
 use std::marker::PhantomData;
 
@@ -18,43 +48,86 @@ use ff::Field;
 use spartan2::traits::{circuit::SpartanCircuit, Engine};
 use sphincs_circuit::{
     alloc_digest_shared, enforce_bytes_eq_shared, enforce_message_padding, link_shared_slice,
-    synthesize_hash_message, hash_msg::SPX_DGST_BYTES, thash::SPX_N,
+    synthesize_hash_message, synthesize_verify_core, hash_msg::SPX_DGST_BYTES, thash::SPX_N,
+    verify::SPX_D,
 };
 
 use crate::fold::E;
 
 type Scalar = <E as Engine>::Scalar;
 
-/// Which slice of the verify core is synthesized in this circuit.
+/// Which slice of the verify core is synthesized in [`FoldVerifyCoreCircuit::precommitted`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerifyCorePhase {
-    /// `hash_message(R, PK, M)` + trace link digest checks on shared bus.
+    /// Phase 2a: `hash_message(R, PK, M)` + shared link digest checks on the shared bus.
+    ///
+    /// Smaller than [`Self::Full`] — use to debug NeutronNova `C_core` layout before enabling
+    /// the full FORS / hypertree / root pipeline.
     HashMessage,
-    /// Full `synthesize_verify_core` (not wired yet).
+    /// Phase 2b: entire [`synthesize_verify_core`] (hash_message → FORS → 7× hypertree → root).
     Full,
 }
 
-/// NeutronNova core carrying real SPHINCS+ verify constraints.
+/// Pin each `link_digests[k]` (trace bytes) to the corresponding shared link variables.
 ///
-/// Shares the same `shared()` layout as [`super::FoldStepBoundCircuit`] (`8 × num_links`
-/// field elements) so step compressions and core glue reference identical link variables.
+/// Shared layout: `8` field words per link digest (`DIGEST_WORDS`), same as
+/// [`super::FoldStepBoundCircuit`]. When `link_digests` is empty (plain-step tests), this is a no-op.
+fn enforce_core_shared_links<Scalar, CS>(
+    cs: &mut CS,
+    shared: &[AllocatedNum<Scalar>],
+    link_digests: &[[u8; 32]],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    for (k, digest) in link_digests.iter().enumerate() {
+        enforce_bytes_eq_shared(
+            cs.namespace(|| format!("core_link_{k}")),
+            "trace",
+            digest,
+            link_shared_slice(shared, k),
+        )?;
+    }
+    Ok(())
+}
+
+/// NeutronNova **core** carrying real SPHINCS+ verify constraints.
+///
+/// # Shared witness
+///
+/// `shared()` allocates `link_digests.len() × DIGEST_WORDS` field elements. Every folded step
+/// instance and this core **must** use the same shared commitment (`comm_W_shared`) with
+/// identical column indices — see `docs/SHARED_WITNESS_DEBUG.md`.
+///
+/// # Constructors
+///
+/// - [`Self::hash_message`] — Phase 2a smoke (hash only).
+/// - [`Self::full`] — Phase 2b (full verify). Prefer
+///   [`super::verify_witness::fold_verify_core_from_pqclean`] for PQClean KATs.
 #[derive(Clone, Debug)]
 pub struct FoldVerifyCoreCircuit {
     pub phase: VerifyCorePhase,
     pub pk: [u8; SPHINCS_PK_BYTES],
     /// Padded message buffer (`MESSAGE_MAX_BYTES`); only `message[0..mlen]` is hashed.
     pub message: [u8; MESSAGE_MAX_BYTES],
+    /// Active message length (synthesis-time constant until Phase 2c public IO).
     pub mlen: usize,
-    /// Signature prefix `R` (`SPX_N` bytes).
+    /// Signature prefix `R` (`SPX_N` bytes) — used by `hash_message`.
     pub r: [u8; SPX_N],
-    /// Expected MGF1 output from `hash_message` (30 bytes).
+    /// Expected raw MGF1 output (30 B) — enforced in R1CS; parsed fields derived in-circuit.
     pub hm_mgf: [u8; SPX_DGST_BYTES],
-    /// `link_digests[k]` = shared witness for boundary between step `k` and `k+1`.
+    /// Full verify only: complete signature.
+    pub signature: Option<[u8; SPHINCS_SIG_BYTES]>,
+    /// Full verify only: hypertree layer roots (trusted synthesis hint for WOTS topology).
+    pub intermediate_roots: Option<[[u8; SPX_N]; SPX_D]>,
+    /// `link_digests[k]` = expected bytes at boundary between step `k` and `k+1` on the trace.
     pub link_digests: Vec<[u8; 32]>,
     _p: PhantomData<Scalar>,
 }
 
 impl FoldVerifyCoreCircuit {
+    /// Phase 2a: `hash_message` + optional shared link checks (no FORS / hypertree).
     pub fn hash_message(
         pk: [u8; SPHINCS_PK_BYTES],
         message: [u8; MESSAGE_MAX_BYTES],
@@ -71,11 +144,53 @@ impl FoldVerifyCoreCircuit {
             mlen,
             r,
             hm_mgf,
+            signature: None,
+            intermediate_roots: None,
             link_digests,
             _p: PhantomData,
         }
     }
 
+    /// Phase 2b/2c: full [`synthesize_verify_core`] inside `C_core`.
+    ///
+    /// **Phase 2c:** no `hm_expected` field — `mhash`/`tree`/`leaf_idx` are parsed inside the
+    /// gadget from witness `mgf_bits` constrained to `hm_mgf`. Only `intermediate_roots` remains
+    /// a trusted synthesis hint (WOTS topology).
+    ///
+    /// Prefer [`super::verify_witness::fold_verify_core_from_pqclean`] for PQClean KATs.
+    ///
+    /// # Testing
+    ///
+    /// ```bash
+    /// cargo test -p sphincs-prover --features pqclean --release \
+    ///   --test fold_verify_core_full fold_verify_core_full_setup -- --ignored --nocapture
+    /// ```
+    pub fn full(
+        pk: [u8; SPHINCS_PK_BYTES],
+        message: [u8; MESSAGE_MAX_BYTES],
+        mlen: usize,
+        signature: [u8; SPHINCS_SIG_BYTES],
+        r: [u8; SPX_N],
+        hm_mgf: [u8; SPX_DGST_BYTES],
+        intermediate_roots: [[u8; SPX_N]; SPX_D],
+        link_digests: Vec<[u8; 32]>,
+    ) -> Self {
+        assert!(mlen <= MESSAGE_MAX_BYTES);
+        Self {
+            phase: VerifyCorePhase::Full,
+            pk,
+            message,
+            mlen,
+            r,
+            hm_mgf,
+            signature: Some(signature),
+            intermediate_roots: Some(intermediate_roots),
+            link_digests,
+            _p: PhantomData,
+        }
+    }
+
+    /// Number of step↔step link digests (= `link_digests.len()` = shared columns / 8).
     pub fn num_links(&self) -> usize {
         self.link_digests.len()
     }
@@ -102,7 +217,8 @@ where
 
 impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
     fn public_values(&self) -> Result<Vec<Scalar>, SynthesisError> {
-        // Match [`FoldCoreBoundCircuit`] / [`FoldStepBoundCircuit`] segment layout (one public IO).
+        // Phase 2c will return packed PK || M || mlen. Until then: placeholder matching
+        // FoldStepBoundCircuit / FoldCoreBoundCircuit (Spartan2 requires ≥1 inputized column).
         Ok(vec![Scalar::ZERO])
     }
 
@@ -134,20 +250,41 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                     &self.hm_mgf,
                 )?;
 
-                for (k, digest) in self.link_digests.iter().enumerate() {
-                    enforce_bytes_eq_shared(
-                        cs.namespace(|| format!("core_link_{k}")),
-                        "trace",
-                        digest,
-                        link_shared_slice(shared, k),
-                    )?;
-                }
+                enforce_core_shared_links(
+                    &mut cs.namespace(|| "links"),
+                    shared,
+                    &self.link_digests,
+                )?;
             }
             VerifyCorePhase::Full => {
-                return Err(SynthesisError::AssignmentMissing);
+                let signature = self
+                    .signature
+                    .as_ref()
+                    .ok_or(SynthesisError::AssignmentMissing)?;
+                let intermediate_roots = self
+                    .intermediate_roots
+                    .as_ref()
+                    .ok_or(SynthesisError::AssignmentMissing)?;
+
+                synthesize_verify_core(
+                    cs.namespace(|| "verify_core"),
+                    &self.pk,
+                    &self.message,
+                    self.mlen,
+                    signature,
+                    &self.hm_mgf,
+                    intermediate_roots,
+                )?;
+
+                enforce_core_shared_links(
+                    &mut cs.namespace(|| "links"),
+                    shared,
+                    &self.link_digests,
+                )?;
             }
         }
 
+        // Spartan2 requires at least one inputized witness column in precommitted.
         let x = AllocatedNum::alloc(cs.namespace(|| "core_x"), || Ok(Scalar::ZERO))?;
         x.inputize(cs.namespace(|| "inputize core_x"))?;
         Ok(vec![])
@@ -164,6 +301,7 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
         _precommitted: &[AllocatedNum<Scalar>],
         _challenges: Option<&[Scalar]>,
     ) -> Result<(), SynthesisError> {
+        // All constraints are allocated in precommitted() — same pattern as FoldStepCircuit.
         Ok(())
     }
 }
@@ -182,7 +320,7 @@ pub fn message_bytes(msg: &[u8]) -> Vec<u8> {
     msg.to_vec()
 }
 
-/// Extract `R` from a SPHINCS+ signature.
+/// Extract `R` (first `SPX_N` bytes) from a SPHINCS+ signature.
 pub fn sig_r(sig: &[u8; SPHINCS_SIG_BYTES]) -> [u8; SPX_N] {
     let mut r = [0u8; SPX_N];
     r.copy_from_slice(&sig[..SPX_N]);

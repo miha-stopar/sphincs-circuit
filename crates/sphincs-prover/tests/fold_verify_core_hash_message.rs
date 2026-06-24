@@ -1,4 +1,7 @@
-//! Phase 2 smoke: folded bound steps + real `hash_message` core (`FoldVerifyCoreCircuit`).
+//! Phase 2a NeutronNova tests: [`VerifyCorePhase::HashMessage`] in `C_core`.
+//!
+//! Phase 2b/2c (full verify, no `hm_expected`) lives in `fold_verify_core_full.rs`.
+//! Design: `docs/VERIFY_CORE.md`.
 
 #![cfg(feature = "pqclean")]
 

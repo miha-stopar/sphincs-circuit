@@ -2,7 +2,7 @@
 
 Supersedes the old prepare/show credential layout. Scope: prove `Verify(PK, M, σ) = 1` only.
 
-See [TRACE.md](TRACE.md) (compression trace + core wiring), [SPHINCS.md](SPHINCS.md) (algorithm), [CODEMAP.md](CODEMAP.md) (PQClean files).
+See [TRACE.md](TRACE.md) (compression trace + core wiring), [SPHINCS.md](SPHINCS.md) (algorithm), [CODEMAP.md](CODEMAP.md) (PQClean files), [VERIFY_CORE.md](VERIFY_CORE.md) (NeutronNova `C_core` adapter).
 
 ---
 
@@ -60,14 +60,14 @@ Several M2 gadgets take **Rust parameters** at circuit synthesis that affect con
 
 | Input / parameter | Where | Enforced in R1CS today? | Risk if wrong | Production fix |
 |-------------------|-------|-------------------------|---------------|----------------|
-| **`hm_mgf`** (30 B MGF1 output) | `synthesize_hash_message` | ✅ `mgf_bits == hm_mgf` | — | Keep |
-| **`hm_expected.mhash`**, **`.tree`**, **`.leaf_idx`** | `synthesize_verify_core` | ❌ used as Rust constants for FORS addresses / `mhash` input; only `hm_mgf` is checked | Wrong tree/leaf/mhash baked into address structure while MGF1 passes | Decompose `mgf_bits` in-circuit (`parse_mgf_output` + bit masks for `SPX_TREE_BITS` / `SPX_LEAF_BITS`); drop separate `hm_expected` |
+| **`hm_mgf`** (30 B MGF1 output) | `synthesize_hash_message` / `_parsed` | ✅ `mgf_bits == hm_mgf` | — | Keep |
+| **`mhash`**, **`tree`**, **`leaf_idx`** | `synthesize_verify_core` via [`synthesize_hash_message_parsed`](../crates/sphincs-circuit/src/hash_msg.rs) | ⚠️ Parsed at **synthesis** from witness `mgf_bits` (same bits as `hm_mgf` check); FORS/hypertree **addresses** still use Rust `u64`/`u32` constants, not in-circuit bit mux | Attacker cannot pass a separate wrong `hm_expected` oracle; address topology still fixed at synthesis from assigned mgf witness | Optional hardening: in-circuit `parse_mgf_output` bit masks wiring tree/leaf into address gadgets |
 | **`intermediate_roots[layer]`** / **`root_in_bytes`** | `hypertree_layer_from_root_bits` | ⚠️ `enforce_bits_equal_bytes(root_in_bits, root_in_bytes)` ties witness root to hint bytes; **`chain_lengths(root_in_bytes)`** fixes WOTS unroll counts at synthesis | Wrong topology (chain step counts) if hint ≠ witness root | Derive lengths from `root_in_bits` in-circuit, or max-unroll + mask (see `wots.rs`) |
 | **`message`**, **`mlen`** | `hash_message_bits`, `FoldVerifyCoreCircuit` | ⚠️ `mlen` is synthesis-time constant; only `M[0..mlen]` wired; tail not in R1CS | OK while `M` is build-time constant; breaks once `M` is public prover input | Public `VerifyPublic` + padding policy (off-circuit or on public `M`); variable public `mlen` in Phase 2c ([HACKMD](HACKMD_NEUTRONNOVA_PLAN.md) §Phase 2) |
 | **`pk`**, **`signature`** bytes | Many gadgets (`R`, `pub_seed`, sig chunks) | Mixed: some `alloc_input_bits` (witness), some `Boolean::constant` | Constants can't be forged at prove time, but aren't yet public statement inputs | Wire as public IO where statement requires (`PK` public; `σ` private witness) |
 | **PQClean trace** (`sha256_compressions`, link digests) | `C_step`, shared links | ✅ per-compression + link equalities (when bound) | Bad trace → local `is_sat` fail | Keep; trace is private witness |
-| **Addresses** (`fors_addr`, `wots_addr`, …) | Built from `tree` / `idx_leaf` | Constants from `hm_expected` (see above) | Same as `hm_expected` | Derive indices from in-circuit `hash_message` parse |
+| **Addresses** (`fors_addr`, `wots_addr`, …) | Built from `tree` / `idx_leaf` | Constants from synthesis-time parse of constrained `mgf_bits` (see above) | Topology fixed at synthesis; must match assigned mgf witness | Wire tree/leaf bits into address allocation (optional) |
 
-**Witness-generator obligation (until in-circuit fixes land):** `witness_from_trace` / prover setup must supply mutually consistent oracles — `hm_mgf == MGF1(...)`, `hm_expected == parse(hm_mgf)`, `intermediate_roots` matching layer-by-layer PQClean replay. Tests use `intermediate_roots_oracle` in `verify.rs`.
+**Witness-generator obligation:** use [`fold_verify_core_from_pqclean`](../crates/sphincs-prover/src/verify_witness.rs) or ensure `hm_mgf == MGF1(...)`, `intermediate_roots` from [`intermediate_roots_oracle`](../crates/sphincs-prover/src/verify_witness.rs) with `parse_mgf_output(hm_mgf)` for indices. See [VERIFY_CORE.md](VERIFY_CORE.md).
 
 **Not the same as trusted setup:** these are implementation gaps in the arithmetization, not a ceremony. Closing them is Phase 2 `Full` / production hardening ([PLAN.md](PLAN.md) M3–M4).

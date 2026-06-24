@@ -8,6 +8,15 @@
 //! ([`circuit_spec::VerifyPublic`]); variable public `mlen` (runtime public input +
 //! muxed SHA preimage) lands in Phase 2 `Full` / final Spartan IO — not in the current
 //! `FoldVerifyCoreCircuit` smoke path. See `docs/HACKMD_NEUTRONNOVA_PLAN.md` §Phase 2.
+//!
+//! ## Phase 2c — parsed fields from witness MGF1
+//!
+//! [`synthesize_hash_message_parsed`] enforces `mgf_bits == expected_mgf` and returns
+//! [`HashMessageOutput`] via [`hash_message_output_from_mgf_bits`] / [`parse_mgf_output`].
+//! No separate trusted `hm_expected` parameter. Address topology still uses synthesis-time
+//! `u64`/`u32` from witness assignments (optional future: in-circuit bit mux).
+//!
+//! **Tests:** `cargo test -p sphincs-circuit parsed_output_matches_native`
 
 use crate::fors::SPX_FORS_MSG_BYTES;
 use crate::thash::{alloc_input_bits, enforce_bits_equal_bytes, SPX_N};
@@ -32,10 +41,9 @@ pub const SPX_DGST_BYTES: usize = SPX_FORS_MSG_BYTES + SPX_TREE_BYTES + SPX_LEAF
 
 /// Outputs of `hash_message`.
 ///
-/// In `synthesize_verify_core`, only the raw MGF1 bytes (`hm_mgf`) are enforced
-/// in-circuit today; `mhash` / `tree` / `leaf_idx` should match `parse_mgf_output(hm_mgf)`
-/// but are still passed separately as synthesis-time hints — see `docs/CIRCUIT.md`
-/// §Synthesis-time hints.
+/// In `synthesize_verify_core`, `mhash` / `tree` / `leaf_idx` are derived from witness
+/// `mgf_bits` via [`hash_message_output_from_mgf_bits`] (PQClean mask), not a separate
+/// trusted parameter — see [`synthesize_hash_message_parsed`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HashMessageOutput {
     pub mhash: [u8; SPX_FORS_MSG_BYTES],
@@ -72,7 +80,25 @@ fn bytes_to_ull(b: &[u8]) -> u64 {
     out
 }
 
-fn parse_mgf_output(buf: &[u8; SPX_DGST_BYTES]) -> HashMessageOutput {
+/// Native PQClean parse of the 30-byte MGF1 buffer (masks tree / leaf fields).
+///
+/// Applies `SPX_TREE_BITS` / `SPX_LEAF_BITS` masks — unused high bits in the tree/leaf byte
+/// fields may be non-zero in PQClean output; masking happens here, not via extra R1CS constraints.
+///
+/// **In-circuit path:** [`synthesize_hash_message_parsed`] enforces `mgf_bits == hm_mgf`, then calls
+/// [`hash_message_output_from_mgf_bits`] which reads witness assignments via `Boolean::get_value()`
+/// and runs this function. FORS/hypertree **address bytes** still use the resulting `u64`/`u32` as
+/// synthesis-time constants (optional future: wire tree/leaf bits into address gadgets).
+///
+/// **Witness prep:** `sphincs-prover::fold_verify_core_from_pqclean` uses this on native `hm_mgf` for
+/// `intermediate_roots_oracle` replay only — not a separate circuit input.
+///
+/// # Testing
+///
+/// ```bash
+/// cargo test -p sphincs-circuit parsed_output_matches_native
+/// ```
+pub fn parse_mgf_output(buf: &[u8; SPX_DGST_BYTES]) -> HashMessageOutput {
     let mut mhash = [0u8; SPX_FORS_MSG_BYTES];
     mhash.copy_from_slice(&buf[..SPX_FORS_MSG_BYTES]);
     let tree = bytes_to_ull(&buf[SPX_FORS_MSG_BYTES..SPX_FORS_MSG_BYTES + SPX_TREE_BYTES])
@@ -236,7 +262,72 @@ fn bytes_to_bits_be(bytes: &[u8]) -> Vec<bool> {
     bits
 }
 
+/// Read big-endian bit vector back to bytes (uses witness `get_value()` at synthesis).
+fn bits_to_bytes_be(bits: &[Boolean]) -> Vec<u8> {
+    assert!(bits.len().is_multiple_of(8));
+    bits.chunks(8)
+        .map(|chunk| {
+            let mut byte = 0u8;
+            for (j, bit) in chunk.iter().enumerate() {
+                if bit.get_value().unwrap_or(false) {
+                    byte |= 1 << (7 - j);
+                }
+            }
+            byte
+        })
+        .collect()
+}
+
+/// Build [`HashMessageOutput`] from witness `mgf_bits` after `mgf_bits == expected_mgf` is enforced.
+///
+/// Applies the same PQClean mask as [`parse_mgf_output`] (`SPX_TREE_BITS`, `SPX_LEAF_BITS`).
+/// Unused high bits in the tree/leaf byte fields may be non-zero in PQClean output — we do
+/// **not** force them to zero in R1CS (masking happens here at synthesis / `get_value()` time).
+///
+/// # Testing
+///
+/// ```bash
+/// cargo test -p sphincs-circuit hash_msg::tests::parsed_output_matches_native -- --nocapture
+/// ```
+pub fn hash_message_output_from_mgf_bits(mgf_bits: &[Boolean]) -> HashMessageOutput {
+    let bytes = bits_to_bytes_be(mgf_bits);
+    let mut buf = [0u8; SPX_DGST_BYTES];
+    buf.copy_from_slice(&bytes[..SPX_DGST_BYTES]);
+    parse_mgf_output(&buf)
+}
+
+/// Synthesize `hash_message`, enforce `expected_mgf`, and **parse** `mhash` / `tree` / `leaf_idx`
+/// from the witness MGF1 bits (no separate trusted `hm_expected`).
+///
+/// Returns parsed [`HashMessageOutput`] for downstream gadgets (FORS addresses, hypertree indices).
+///
+/// # Testing
+///
+/// ```bash
+/// cargo test -p sphincs-circuit parsed_output_matches_native
+/// cargo test -p sphincs-circuit wrong_hm_mgf_unsatisfies_parsed_hash_message
+/// ```
+pub fn synthesize_hash_message_parsed<Scalar, CS>(
+    mut cs: CS,
+    r: &[u8; SPX_N],
+    pk: &[u8; SPX_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
+    expected_mgf: &[u8; SPX_DGST_BYTES],
+) -> Result<HashMessageOutput, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let (mgf_bits, _) = hash_message_bits(cs.namespace(|| "hm"), r, pk, message, mlen)?;
+    enforce_bits_equal_bytes(cs.namespace(|| "mgf_out"), &mgf_bits, expected_mgf)?;
+    Ok(hash_message_output_from_mgf_bits(&mgf_bits))
+}
+
 /// Synthesize `hash_message` and enforce MGF1 output matches `expected_mgf` (30 bytes).
+///
+/// Thin wrapper around [`synthesize_hash_message_parsed`] that discards the parsed
+/// [`HashMessageOutput`]. Prefer `_parsed` when downstream gadgets need `mhash` / `tree` / `leaf_idx`.
 pub fn synthesize_hash_message<Scalar, CS>(
     mut cs: CS,
     r: &[u8; SPX_N],
@@ -249,8 +340,8 @@ where
     Scalar: ff::PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    let (mgf_bits, _) = hash_message_bits(cs.namespace(|| "hm"), r, pk, message, mlen)?;
-    enforce_bits_equal_bytes(cs.namespace(|| "mgf_out"), &mgf_bits, expected_mgf)
+    synthesize_hash_message_parsed(cs, r, pk, message, mlen, expected_mgf)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -287,6 +378,32 @@ mod tests {
             tree: oracle.tree,
             leaf_idx: oracle.leaf_idx,
         });
+    }
+
+    /// Phase 2c: `synthesize_hash_message_parsed` agrees with native [`parse_mgf_output`] and PQClean.
+    ///
+    /// ```bash
+    /// cargo test -p sphincs-circuit parsed_output_matches_native -- --nocapture
+    /// ```
+    #[test]
+    fn parsed_output_matches_native() {
+        let r = [0x33u8; 16];
+        let pk = [0x44u8; 32];
+        let msg = b"parsed output from mgf witness";
+        let mlen = msg.len();
+        let mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+        let native = parse_mgf_output(&mgf);
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let parsed =
+            synthesize_hash_message_parsed(&mut cs, &r, &pk, msg, mlen, &mgf).expect("synth");
+        assert!(cs.is_satisfied());
+        assert_eq!(parsed, native);
+
+        let oracle = sphincs_ref::hash_message_oracle(&r, &pk, msg, mlen);
+        assert_eq!(parsed.mhash, oracle.mhash);
+        assert_eq!(parsed.tree, oracle.tree);
+        assert_eq!(parsed.leaf_idx, oracle.leaf_idx);
     }
 
     #[test]

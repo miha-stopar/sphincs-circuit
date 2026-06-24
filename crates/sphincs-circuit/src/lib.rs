@@ -3,7 +3,10 @@
 //! **M1:** bit-accurate one-compression step (`C_step`) using bellpepper SHA-256.
 //! **M2 (current):** full verify core sub-gadgets + top-level glue in `verify`.
 //! **M2:** complete — verify core + trace witness alignment in `witness`.
-//! **Next:** M3 NeutronNova fold + Spartan2 prove.
+//! **M3:** NeutronNova fold — [`FoldVerifyCoreCircuit`] in `sphincs-prover` (see `docs/VERIFY_CORE.md`).
+//! **Phase 2c:** `hm_expected` removed — parse `mhash`/`tree`/`leaf_idx` from constrained `hm_mgf`
+//! witness via [`synthesize_hash_message_parsed`] / [`parse_mgf_output`].
+//! **Next:** full trace KAT, public IO, in-circuit address bit mux, `intermediate_roots` from witness.
 
 pub mod chain;
 pub mod shared_link;
@@ -24,8 +27,10 @@ pub use fors::{
     fors_pk_from_sig_bits, message_to_indices, synthesize_fors_pk_from_sig, SPX_FORS_BYTES,
     SPX_FORS_MSG_BYTES, SPX_FORS_TREES,
 };
+/// `hash_message` gadgets and Phase 2c parse helpers (`parse_mgf_output`, `synthesize_hash_message_parsed`).
 pub use hash_msg::{
-    hash_message_mgf_buf, hash_message_native, synthesize_hash_message, HashMessageOutput,
+    hash_message_mgf_buf, hash_message_native, hash_message_output_from_mgf_bits,
+    parse_mgf_output, synthesize_hash_message, synthesize_hash_message_parsed, HashMessageOutput,
     SPX_DGST_BYTES,
 };
 pub use hypertree::{
@@ -48,9 +53,10 @@ pub use thash::{
     enforce_bits_equal_bytes, synthesize_thash, synthesize_thash_with_stats, thash_digest_bits,
     thash_preimage, ThashStats,
 };
-pub use verify::synthesize_verify_core;
-pub use verify::enforce_message_padding;
-pub use verify::enforce_message_padding_witness;
+pub use verify::{
+    enforce_message_padding, enforce_message_padding_witness, synthesize_verify_core, SPX_D,
+    SIG_AFTER_FORS, SIG_R_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
+};
 pub use witness::{
     local_chain_segments, step_input_from_row, trace_stats, witness_from_compressions,
     LocalChain, TraceStats,

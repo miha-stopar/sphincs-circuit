@@ -214,6 +214,7 @@ Bit-accurate SHA-256 compression step, `thash`, `compute_root`, WOTS+, FORS, hyp
 | `FoldPackedChainCircuit` / `FoldPackedCoreBoundCircuit` | ✅ sound **intra-step** chain |
 | `FoldStepBoundCircuit` + shared witness | ✅ `fold_bound_shared` passes |
 | `FoldVerifyCoreCircuit` (`hash_message` increment) | ✅ `fold_verify_core_hash_message` |
+| `FoldVerifyCoreCircuit` (`Full` = `synthesize_verify_core`) | ✅ `fold_verify_core_full_setup` (release `--ignored`); see [VERIFY_CORE.md](VERIFY_CORE.md) |
 | Full trace / KAT prove | ⬜ |
 | `fold-bench` scaling | ✅ |
 
@@ -229,7 +230,7 @@ Bit-accurate SHA-256 compression step, `thash`, `compute_root`, WOTS+, FORS, hyp
 | **Single step instance** | `num_steps = 1` has caused prover panics in past tests | Use ≥ 2 instances (see packed chain test) |
 | **Full verify gadget in prover** | `synthesize_verify_core` in `sphincs-circuit`; **`FoldVerifyCoreCircuit`** ports it incrementally (`hash_message` first) | Phase 2 in progress |
 | **Oracle / intermediate_roots** | `intermediate_roots` + `root_in_bytes` fix WOTS `chain_lengths` topology at synthesis; witness roots tied via `enforce_bits_equal_bytes` — see [CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints | `hypertree.rs`, `verify.rs` |
-| **`hm_expected` vs `hm_mgf`** | Only raw MGF1 enforced in-circuit; `tree` / `leaf_idx` / `mhash` still from trusted `hm_expected` — see [CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints | `verify.rs`, `hash_msg.rs` |
+| **`hm_expected` removed (Phase 2c)** | ✅ `mhash`/`tree`/`leaf_idx` from constrained `mgf_bits` at synthesis; no separate oracle field on `FoldVerifyCoreCircuit` | `hash_msg.rs`, `verify.rs`, `verify_core.rs` |
 
 **Honest status of “we have a zk fold” today:** we can prove π for real PQClean compression rows **and** a separate core, but π does **not** yet imply a full sound SPHINCS+ verify unless you use the **packed** path for the chain fragment or fix **Option A/B**.
 
@@ -301,7 +302,7 @@ cargo run -p sphincs-prover --features pqclean --release \
 | Stage | `mlen` in circuit | `hash_message` | Public Spartan IO |
 | --- | --- | --- | --- |
 | **2a (now)** — `VerifyCorePhase::HashMessage` smoke | Synthesis-time constant on `FoldVerifyCoreCircuit` (fixed per proof instance) | `hash_message_bits` slices `message[..mlen]` at circuit build time | Dummy `public_values` (placeholder) |
-| **2b** — `VerifyCorePhase::Full` | Same fixed `mlen` per instance OK for KATs / benchmarks | Full `synthesize_verify_core` + trace must match that `mlen` | Begin wiring `PK`, padded `M`, `mlen` via `inputize` |
+| **2b** — `VerifyCorePhase::Full` | Same fixed `mlen` per instance OK for KATs / benchmarks | Full `synthesize_verify_core` + trace must match that `mlen` — ✅ wired (`fold_verify_core_full_*`, release `--ignored`) | Begin wiring `PK`, padded `M`, `mlen` via `inputize` |
 | **2c** — production v1 | **Public** `mlen` scalar (`VerifyPublic`) | Variable-length preimage (mux or incremental SHA) + compression count `2 + ⌈mlen/64⌉` aligned to trace | Verifier checks `(PK, M, mlen)`; padding off-circuit or on public `M` |
 
 Do **not** block Phase 2a/2b on variable public `mlen` — fixed-`mlen` proofs are sufficient for `fold_verify_core_hash_message` and full-core KATs. Variable public `mlen` is required only when the outer Spartan statement must accept different message lengths in **one** universal circuit.
@@ -324,11 +325,13 @@ Grouped by impact on a production ZK verify proof.
 
 ---
 
-### P1b — Real `C_core` in prover (**current focus**)
+### P1b — Real `C_core` in prover (**Phase 2b done; 2c next**)
 
-**Goal:** Port `synthesize_verify_core` into `FoldVerifyCoreCircuit` as NeutronNova `C_core`, incrementally (`hash_message` smoke test first).
+**Goal:** Port `synthesize_verify_core` into `FoldVerifyCoreCircuit` as NeutronNova `C_core`.
 
-**Done when:** `fold_verify_core_hash_message` passes — ✅ (`hash_message` increment). Extend to full `synthesize_verify_core` + `M_MAX` padding policy (synthesis-time zero tail for now; public `M`/`mlen` per §Phase 2 table later).
+**Done:** Phase 2a (`hash_message`) + Phase 2b (`VerifyCorePhase::Full`) — see [VERIFY_CORE.md](VERIFY_CORE.md).
+
+**Next (2c):** public `PK, M, mlen`; in-circuit `parse(hm_mgf)`; full trace KAT.
 
 ---
 

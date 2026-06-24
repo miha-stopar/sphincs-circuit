@@ -164,10 +164,11 @@ No trusted setup. Groth16 not used.
 - [x] Sound local-chain wiring in one step (`FoldPackedChainCircuit<N>`, wire `h_out[i]→h_in[i+1]`)
 - [x] Bind core link witnesses to per-instance folded step wires — uniform selector in [`FoldStepBoundCircuit`](../crates/sphincs-prover/src/bound.rs); `fold_bound_shared` passes (see [SHARED_WITNESS_DEBUG.md](SHARED_WITNESS_DEBUG.md))
 - [x] Fold prefix of full trace (`fold_trace_batch`: 8 steps CI, 32 ignored)
-- [x] Real `C_core` in prover — [`FoldVerifyCoreCircuit`](../crates/sphincs-prover/src/verify_core.rs): `hash_message` smoke passes (`fold_verify_core_hash_message`); full `synthesize_verify_core` next
+- [x] Real `C_core` in prover — [VERIFY_CORE.md](VERIFY_CORE.md): Phase 2a `hash_message` ✅ CI; Phase 2b `Full` ✅ (`fold_verify_core_full_setup`, release `--ignored`)
 - [ ] Public `mlen` in Spartan IO — **deferred:** smoke/full-core KATs use fixed `mlen` per circuit instance; variable public `mlen` + trace alignment in final v1 IO (see [HACKMD_NEUTRONNOVA_PLAN.md](HACKMD_NEUTRONNOVA_PLAN.md) §Phase 2 `mlen` table)
 - [ ] Spartan2 proof of full verify on KAT (~all trace compressions)
-- [ ] Close synthesis-time hint gaps — [CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints (`hm_expected` parse, `chain_lengths` from witness, public `M`/`mlen`)
+- [x] Drop separate `hm_expected` — parse from `hm_mgf` witness (`synthesize_hash_message_parsed`)
+- [ ] Close remaining synthesis-time hint gaps — [CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints (`chain_lengths` from witness, public `M`/`mlen`, optional in-circuit tree/leaf mux)
 - [x] Bench harness: `cargo run -p sphincs-prover --features pqclean --release --bin fold-bench -- N`
 - [ ] Benchmark: full trace prove/verify vs native verify
 

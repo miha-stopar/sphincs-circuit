@@ -14,13 +14,22 @@ use crate::hash_msg::{
     SPX_DGST_BYTES, SPX_PK_BYTES,
 };
 use crate::thash::enforce_bits_equal_bytes;
-use crate::sha256_compress::{
-    sha256_state_words_to_bits_be, synthesize_compression_chain_for_fold_with_shared,
-    synthesize_compression_trace_row_for_fold,
-};
+use crate::sha256_compress::sha256_state_words_to_bits_be;
+use crate::shared_link::{enforce_words_eq_shared, link_shared_slice, DIGEST_WORDS};
 use crate::step::StepInput;
 use crate::thash::SPX_N;
 use crate::witness::LocalChain;
+use bellpepper::gadgets::sha256::sha256_compression_function;
+use bellpepper::gadgets::uint32::UInt32;
+
+/// SHA-256 initial hash value (FIPS 180-4 §5.3.3), as eight big-endian state words.
+///
+/// Used to pin the first seed compression's `h_in` so the prover cannot start the seed hash
+/// from an arbitrary chaining value. See [`seed_hash_words_bound`].
+const SHA256_IV: [u32; 8] = [
+    0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a, 0x510e_527f, 0x9b05_688c, 0x1f83_d9ab,
+    0x5be0_cd19,
+];
 
 /// Number of SHA-256 compressions for one-shot digest of `byte_len` bytes from the IV.
 pub fn sha256_compression_count_fresh(byte_len: usize) -> usize {
@@ -208,37 +217,126 @@ fn constant_bits(bytes: &[u8]) -> Vec<Boolean> {
 }
 
 
-fn seed_hash_bits_from_trace<Scalar, CS>(
+/// Standard SHA-256 padded 64-byte blocks of the seed preimage `R ‖ PK ‖ M[0..mlen]`.
+///
+/// These blocks are a deterministic function of the **public statement** `(R, PK, M, mlen)`.
+/// Binding the in-circuit seed compressions to them (rather than to prover-supplied trace
+/// `block` witnesses) is what makes trace-linked `hash_message` sound — see the SOUNDNESS note
+/// on [`seed_hash_words_bound`].
+///
+/// PQClean's incremental hash (`inc_blocks` over the first 64 bytes for `mlen >= 16`, then
+/// `inc_finalize` over the tail) absorbs exactly `R ‖ PK ‖ M[0..mlen]`, so the concatenation of
+/// all seed compression blocks equals the standard SHA-256 padding of that buffer. The 64-byte
+/// chunk boundaries therefore match the PQClean trace's seed compression rows one-for-one.
+fn hash_message_seed_blocks(
+    r: &[u8; SPX_N],
+    pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
+) -> Vec<[u8; 64]> {
+    let mut p: Vec<u8> = Vec::with_capacity(HASH_MESSAGE_PREFIX_BYTES + mlen);
+    p.extend_from_slice(r);
+    p.extend_from_slice(&pk[..SPX_PK_BYTES]);
+    p.extend_from_slice(&message[..mlen]);
+
+    let bitlen = (p.len() as u64) * 8;
+    p.push(0x80);
+    while p.len() % 64 != 56 {
+        p.push(0);
+    }
+    p.extend_from_slice(&bitlen.to_be_bytes());
+
+    p.chunks(64)
+        .map(|c| {
+            let mut b = [0u8; 64];
+            b.copy_from_slice(c);
+            b
+        })
+        .collect()
+}
+
+/// Compute the seed hash `SHA256(R ‖ PK ‖ M[0..mlen])` in-circuit, bound to the public statement.
+///
+/// # SOUNDNESS (why this exists)
+///
+/// The earlier implementation fed the SHA compression **prover-supplied trace `block` and `h_in`
+/// witnesses** (`StepInput`) directly. Those witnesses were never constrained to equal
+/// `R ‖ PK ‖ M` or the SHA-256 IV, so a malicious prover could hash an entirely different
+/// message, satisfy `mgf_bits == hm_mgf` with a matching forged `hm_mgf`, and still produce an
+/// accepting proof for an unrelated public `M`. That broke the verify relation for the message.
+///
+/// This function instead:
+/// 1. Reconstructs the seed preimage blocks **from `(R, PK, M, mlen)`** ([`hash_message_seed_blocks`]).
+/// 2. Pins the first compression's `h_in` to the SHA-256 [`SHA256_IV`].
+/// 3. Feeds each compression a **constant** block derived from the statement (not trace witnesses).
+/// 4. Optionally links internal boundaries to the folded `C_step` instances via `shared`
+///    (an optimization; soundness no longer depends on it because the core self-computes the hash).
+///
+/// `M` is bound to the public columns transitively: the caller (`FoldVerifyCoreCircuit`) also runs
+/// `enforce_public_matches_statement` / `enforce_public_matches_pk_message`, which tie the public
+/// `PK` / `M` columns to the same `self.message` / `self.pk` constants used here.
+fn seed_hash_words_bound<Scalar, CS>(
     mut cs: CS,
-    seed_rows: &[StepInput],
+    r: &[u8; SPX_N],
+    pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
+    seed_rows_len: usize,
     shared: &[AllocatedNum<Scalar>],
-) -> Result<Vec<Boolean>, SynthesisError>
+) -> Result<Vec<UInt32>, SynthesisError>
 where
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    let words = match seed_rows.len() {
-        0 => return Err(SynthesisError::AssignmentMissing),
-        1 => synthesize_compression_trace_row_for_fold(cs.namespace(|| "seed_row0"), &seed_rows[0])?,
-        _ => synthesize_compression_chain_for_fold_with_shared(
-            cs.namespace(|| "seed_chain"),
-            seed_rows,
-            shared,
-        )?,
-    };
-    Ok(sha256_state_words_to_bits_be(&words))
+    let blocks = hash_message_seed_blocks(r, pk, message, mlen);
+
+    // The seed compression count is fully determined by `mlen`. Reject any trace whose seed-row
+    // count disagrees so a prover cannot inject or drop compressions.
+    if blocks.is_empty() || blocks.len() != seed_rows_len {
+        return Err(SynthesisError::Unsatisfiable);
+    }
+
+    let links_available = shared.len() >= blocks.len().saturating_sub(1) * DIGEST_WORDS;
+
+    let mut h_words: Vec<UInt32> = SHA256_IV.iter().map(|&w| UInt32::constant(w)).collect();
+    let mut out_words = h_words.clone();
+    for (i, block) in blocks.iter().enumerate() {
+        let block_bits = constant_bits(block);
+        out_words = sha256_compression_function(
+            cs.namespace(|| format!("seed_compress_{i}")),
+            &block_bits,
+            &h_words,
+        )?;
+        if i + 1 < blocks.len() {
+            if links_available {
+                enforce_words_eq_shared(
+                    cs.namespace(|| format!("seed_link_{i}")),
+                    "h_out",
+                    &out_words,
+                    link_shared_slice(shared, i),
+                )?;
+            }
+            h_words = out_words.clone();
+        }
+    }
+    Ok(out_words)
 }
 
-/// Full `hash_message` from PQClean trace rows (seed compressions + optional MGF1 row metadata).
+/// Full `hash_message` bound to the statement `(R, PK, M, mlen)`, with seed compressions optionally
+/// linked to folded `C_step` instances.
 ///
-/// - `seed_rows.len() == 1`: single compression, no shared links.
-/// - `seed_rows.len() >= 2`: internal boundaries wired to `shared`.
-/// - `mgf1_rows`: used by the prover to select folded `C_step` instances; core derives MGF1
-///   one-shot from the trace-linked seed hash (fold proves the MGF1 compression separately).
+/// - Seed-SHA is reconstructed from `(R, PK, M)` ([`seed_hash_words_bound`]) — **sound**.
+/// - `seed_rows.len()` must equal the statement-derived seed compression count, else synthesis fails.
+/// - When `shared` carries link columns, internal seed boundaries are tied to folded steps.
+/// - MGF1 is computed one-shot over `R ‖ pk_seed ‖ seed_hash`; `trace.mgf1_rows` is metadata the
+///   prover uses to *select* folded `C_step` instances and is intentionally unused here.
+#[allow(clippy::too_many_arguments)]
 pub fn synthesize_hash_message_with_trace<Scalar, CS>(
     mut cs: CS,
     r: &[u8; SPX_N],
     pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
     trace: &HashMessageTraceInputs,
     expected_mgf: &[u8; SPX_DGST_BYTES],
     shared: &[AllocatedNum<Scalar>],
@@ -247,8 +345,16 @@ where
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    let seed_hash_bits =
-        seed_hash_bits_from_trace(cs.namespace(|| "seed"), &trace.seed_rows, shared)?;
+    let seed_words = seed_hash_words_bound(
+        cs.namespace(|| "seed"),
+        r,
+        pk,
+        message,
+        mlen,
+        trace.seed_rows.len(),
+        shared,
+    )?;
+    let seed_hash_bits = sha256_state_words_to_bits_be(&seed_words);
 
     let mut seed_bits = constant_bits(r);
     seed_bits.extend(constant_bits(&pk[..SPX_N]));
@@ -259,10 +365,13 @@ where
 }
 
 /// Like [`synthesize_hash_message_with_trace`] but returns parsed [`HashMessageOutput`] for verify core.
+#[allow(clippy::too_many_arguments)]
 pub fn synthesize_hash_message_parsed_with_trace<Scalar, CS>(
     cs: CS,
     r: &[u8; SPX_N],
     pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
     trace: &HashMessageTraceInputs,
     expected_mgf: &[u8; SPX_DGST_BYTES],
     shared: &[AllocatedNum<Scalar>],
@@ -271,17 +380,22 @@ where
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    synthesize_hash_message_with_trace(cs, r, pk, trace, expected_mgf, shared)?;
+    synthesize_hash_message_with_trace(cs, r, pk, message, mlen, trace, expected_mgf, shared)?;
+    // `expected_mgf` is enforced equal to MGF1(seed); since the seed is bound to (R, PK, M),
+    // `expected_mgf` is forced to be the genuine digest and the parsed fields are trustworthy.
     Ok(parse_mgf_output(expected_mgf))
 }
 
-/// `hash_message` with seed-SHA from folded trace rows wired to NeutronNova `shared` links.
+/// `hash_message` with seed-SHA reconstructed from `(R, PK, M)` and linked to folded seed rows.
 ///
-/// MGF1 uses the one-shot bellpepper SHA gadget. Prefer [`synthesize_hash_message_with_trace`].
+/// Thin wrapper around [`synthesize_hash_message_with_trace`] with empty `mgf1_rows`.
+#[allow(clippy::too_many_arguments)]
 pub fn synthesize_hash_message_with_seed_trace<Scalar, CS>(
-    mut cs: CS,
+    cs: CS,
     r: &[u8; SPX_N],
     pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
     seed_rows: &[StepInput],
     expected_mgf: &[u8; SPX_DGST_BYTES],
     shared: &[AllocatedNum<Scalar>],
@@ -294,7 +408,7 @@ where
         seed_rows: seed_rows.to_vec(),
         mgf1_rows: Vec::new(),
     };
-    synthesize_hash_message_with_trace(cs, r, pk, &trace, expected_mgf, shared)
+    synthesize_hash_message_with_trace(cs, r, pk, message, mlen, &trace, expected_mgf, shared)
 }
 
 #[cfg(test)]
@@ -388,10 +502,49 @@ mod tests {
             } else {
                 Vec::new()
             };
-            synthesize_hash_message_with_trace(&mut cs, &r, &pk, &trace, &hm_mgf, &shared)
-                .expect("synth");
+            let mut padded = vec![0u8; mlen];
+            padded[..msg.len().min(mlen)].copy_from_slice(&msg[..msg.len().min(mlen)]);
+            synthesize_hash_message_with_trace(
+                &mut cs, &r, &pk, &padded, mlen, &trace, &hm_mgf, &shared,
+            )
+            .expect("synth");
             assert!(cs.is_satisfied(), "mlen={mlen}");
         }
+    }
+
+    /// SOUNDNESS regression: a seed hash bound to the wrong message must NOT satisfy.
+    ///
+    /// The trace is honest for `msg`, but we synthesize against a different message buffer while
+    /// keeping the original `hm_mgf`. Because the seed compressions are reconstructed from the
+    /// supplied message (not the trace blocks), the MGF1 output no longer matches `hm_mgf`.
+    #[test]
+    fn hash_message_trace_rejects_message_mismatch() {
+        use bellpepper_core::test_cs::TestConstraintSystem;
+        use blstrs::Scalar as Fr;
+        use crate::hash_msg::hash_message_mgf_buf;
+
+        let msg = b"short";
+        let mlen = msg.len();
+        let (pk, r, rows) = trace_rows(msg);
+        let span = locate_hash_message_trace_span_for_mlen(&rows, &r, &pk, mlen).expect("span");
+        let trace = HashMessageTraceInputs::from_span(&rows, &span);
+        let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+
+        // Same length, different content.
+        let mut wrong = msg.to_vec();
+        wrong[0] ^= 0x01;
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        // The seed hash is reconstructed from the (constant) message, so a mismatch is rejected
+        // either as a synthesis `Unsatisfiable` (constant-folded bits differ) or as an unsatisfied
+        // constraint system. Both count as rejection.
+        let res = synthesize_hash_message_with_trace(
+            &mut cs, &r, &pk, &wrong, mlen, &trace, &hm_mgf, &[],
+        );
+        assert!(
+            res.is_err() || !cs.is_satisfied(),
+            "seed hash must be bound to the message, not the trace block"
+        );
     }
 
     #[test]
@@ -420,6 +573,8 @@ mod tests {
             &mut cs,
             &r,
             &pk,
+            &msg,
+            15,
             &seed_inputs,
             &hm_mgf,
             &shared,

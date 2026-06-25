@@ -187,8 +187,8 @@ cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_mes
 1. **Variable public `mlen` (partial)** — [`with_variable_public_mlen`](../crates/sphincs-prover/src/verify_core.rs) + trace-linked seed; full universal circuit (all `mlen` topologies, one setup) in [VARIABLE_MLEN.md](VARIABLE_MLEN.md).
 2. **In-circuit tree/leaf bit mux** — addresses still use synthesis-time constants from parsed mgf witness (optional hardening; see [CIRCUIT.md](CIRCUIT.md)).
 3. **Full trace scale** — tests use 4-step chain prefix, not ~2k compressions.
-4. **`hash_message` trace linking (done)** — seed-SHA wired to NeutronNova `shared` links in Phase 2a and **Full** core (`synthesize_verify_core_with_trace`). MGF1 via folded `C_step`. **`thash` / FORS / hypertree** still use in-gadget SHA.
-5. **Variable public `mlen`** — muxed preimage / incremental SHA in `hash_message_bits`.
+4. **`hash_message` trace linking (done, sound)** — seed-SHA is **reconstructed from `(R, PK, M)`** and pinned to the SHA-256 IV (`seed_hash_words_bound`), then optionally linked to folded `C_step` instances via `shared` (Phase 2a and **Full** core, `synthesize_verify_core_with_trace`). MGF1 derived one-shot; folded MGF1 rows are metadata. **`thash` / FORS / hypertree** still use in-gadget SHA. See [SOUNDNESS_AUDIT.md](SOUNDNESS_AUDIT.md) BUG-1 — earlier versions fed unconstrained trace blocks and did **not** bind the message.
+5. **Variable public `mlen`** — muxed preimage / incremental SHA in `hash_message_bits`; current per-statement specialization documented in [SOUNDNESS_AUDIT.md](SOUNDNESS_AUDIT.md) FINDING-3.
 
 ---
 

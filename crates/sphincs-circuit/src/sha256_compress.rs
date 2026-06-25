@@ -201,6 +201,14 @@ where
 }
 
 /// One PQClean trace row in core glue: allocated block + enforced `h_out` witness.
+///
+/// # SOUNDNESS WARNING
+///
+/// `h_in` and `block` are **free witnesses** (only `h_out == Compress(h_in, block)` is enforced).
+/// This does **not** bind the compression input to any statement, so it must not be used to prove
+/// `hash_message` over a fixed message. `hash_message` reconstructs the seed blocks from
+/// `(R, PK, M)` instead — see [`crate::hash_message_trace`] and `docs/SOUNDNESS_AUDIT.md` BUG-1.
+/// Kept only for generic compression-chain experiments where the inputs are bound elsewhere.
 pub fn synthesize_compression_trace_row_for_fold<Scalar, CS>(
     mut cs: CS,
     row: &crate::step::StepInput,
@@ -333,6 +341,12 @@ where
 /// NeutronNova `shared` link limbs (same variables as [`FoldStepBoundCircuit`]).
 ///
 /// Returns the final compression output words (SHA-256 state after the last row).
+///
+/// # SOUNDNESS WARNING
+///
+/// As with [`synthesize_compression_trace_row_for_fold`], the per-row `h_in` / `block` are free
+/// witnesses. Do **not** use this for `hash_message`; it does not bind the hashed bytes to the
+/// statement. See `docs/SOUNDNESS_AUDIT.md` BUG-1.
 pub fn synthesize_compression_chain_for_fold_with_shared<Scalar, CS>(
     mut cs: CS,
     rows: &[crate::step::StepInput],

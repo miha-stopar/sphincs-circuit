@@ -254,6 +254,8 @@ where
         cs.namespace(|| "hash_message"),
         &r,
         pk,
+        message,
+        mlen,
         trace,
         hm_mgf,
         shared,
@@ -263,6 +265,10 @@ where
 }
 
 /// Full verify core with public IO statement + trace-linked `hash_message`.
+///
+/// The `public` columns are tied to `pk` / `message` by the caller via
+/// [`crate::verify_public_io::enforce_public_matches_statement`] (or `_pk_message`); the seed hash
+/// here is reconstructed from `message` so the hashed preimage is bound to the public statement.
 #[allow(clippy::too_many_arguments)]
 pub fn synthesize_verify_core_public_with_trace<Scalar, CS>(
     mut cs: CS,
@@ -291,6 +297,8 @@ where
         cs.namespace(|| "hash_message"),
         &r,
         pk,
+        message,
+        mlen,
         trace,
         hm_mgf,
         shared,
@@ -558,6 +566,60 @@ mod tests {
         )
         .expect("synth");
         assert!(cs.is_satisfied());
+    }
+
+    /// SOUNDNESS regression at the full-core level: trace-linked `hash_message` must be bound to
+    /// the message, so a one-byte change in the message buffer breaks satisfaction.
+    #[test]
+    #[ignore = "full verify core trace hash_message is slow; run with --release --ignored"]
+    fn verify_core_trace_rejects_message_mismatch() {
+        use crate::hash_message_trace::{
+            locate_hash_message_trace_span_for_mlen, HashMessageTraceInputs,
+        };
+        use sphincs_ref::verify_with_trace;
+
+        let seed = [0xaeu8; CRYPTO_SEEDBYTES];
+        let msg = b"verify core trace mismatch";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+        let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+        let rows: Vec<circuit_spec::Sha256Compression> = trace
+            .compressions
+            .iter()
+            .map(|r| circuit_spec::Sha256Compression {
+                index: r.index,
+                h_in: r.h_in,
+                block: r.block,
+                h_out: r.h_out,
+            })
+            .collect();
+
+        let r = {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&sig[..16]);
+            a
+        };
+        let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, msg.len());
+        let span =
+            locate_hash_message_trace_span_for_mlen(&rows, &r, &pk, msg.len()).expect("span");
+        let trace_inputs = HashMessageTraceInputs::from_span(&rows, &span);
+
+        // Corrupt the message buffer (same length); seed hash now differs from `hm_mgf`.
+        let mut padded = vec![0u8; MESSAGE_MAX_BYTES];
+        padded[..msg.len()].copy_from_slice(msg);
+        padded[0] ^= 0x01;
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let res = synthesize_verify_core_with_trace(
+            &mut cs,
+            &pk,
+            &padded,
+            msg.len(),
+            &sig,
+            &hm_mgf,
+            &trace_inputs,
+            &[],
+        );
+        assert!(res.is_err() || !cs.is_satisfied());
     }
 
     /// Full verify core + public IO + muxed `hash_message` at multiple `mlen` values (slow).

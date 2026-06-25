@@ -17,6 +17,8 @@
 //! | `fold_verify_core_full_prep_prove` | `prep_prove` (witness gen) | bound | yes | `#[ignore]` |
 //! | `fold_verify_core_full_smoke` | prove + verify | bound | yes | `#[ignore]` |
 //! | `fold_verify_core_full_plain_steps` | prove + verify | plain `FoldStepCircuit` | no | `#[ignore]` |
+//! | `fold_verify_core_full_public_io_setup` | `setup` only | bound | yes | `#[ignore]` release |
+//! | `fold_verify_core_full_public_io_smoke` | prove + verify | bound | yes | `#[ignore]` release |
 //!
 //! # Run commands
 //!
@@ -215,4 +217,43 @@ fn fold_verify_core_full_public_io_setup() {
 
     let (_pk_fold, _vk) = setup_with_proto(&steps[0], &core, steps.len());
     eprintln!("full public_io setup ok: steps={n}");
+}
+
+/// Full core + public IO — end-to-end prove + verify (bound steps).
+///
+/// ```bash
+/// cargo test -p sphincs-prover --features pqclean --release \
+///   --test fold_verify_core_full fold_verify_core_full_public_io_smoke -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "full verify core + public_io prove is large; run with --release --ignored"]
+fn fold_verify_core_full_public_io_smoke() {
+    use circuit_spec::VERIFY_PUBLIC_NUM_SCALARS;
+    use spartan2::traits::circuit::SpartanCircuit;
+
+    let seed = [0x4au8; CRYPTO_SEEDBYTES];
+    let msg = b"full core public io smoke prove verify";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+    let n = max_steps();
+    let (chain, steps, _old, links) = longest_chain_bound(&rows, n).expect("chain");
+    let digests: Vec<_> = links.iter().map(|(l, _)| *l).collect();
+
+    let core = fold_verify_core_from_pqclean(pk, sig, msg, digests).with_public_io();
+    assert_eq!(
+        core.public_values().expect("pv").len(),
+        VERIFY_PUBLIC_NUM_SCALARS
+    );
+
+    eprintln!(
+        "full public_io smoke: steps={n} links={} trace indices {}..={}",
+        links.len(),
+        chain.start,
+        chain.end
+    );
+
+    let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
+    let proof = fold_and_prove(&pk_fold, &steps, &core);
+    verify_proof(&vk, &proof, steps.len());
 }

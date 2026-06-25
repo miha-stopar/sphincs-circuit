@@ -6,8 +6,8 @@
 //! struct: the gadget hashes exactly `R(16) ‖ pk(32) ‖ M[0..mlen]` and the compression
 //! trace must match that fixed length. The v1 **relation** still exposes public `mlen`
 //! ([`circuit_spec::VerifyPublic`]); variable public `mlen` (runtime public input +
-//! muxed SHA preimage) lands in Phase 2 `Full` / final Spartan IO — not in the current
-//! `FoldVerifyCoreCircuit` smoke path. See `docs/HACKMD_NEUTRONNOVA_PLAN.md` §Phase 2.
+//! Variable public `mlen` (runtime public input +
+//! muxed SHA preimage) lands in Phase 2c+ — see `docs/VARIABLE_MLEN.md`.
 //!
 //! ## Phase 2c — parsed fields from witness MGF1
 //!
@@ -29,6 +29,10 @@ use sha2::{Digest, Sha256};
 
 /// Public key size (`SPX_PK_BYTES`).
 pub const SPX_PK_BYTES: usize = 32;
+/// `R ‖ PK` prefix bytes in `hash_message` seed hash (`SPX_N + SPX_PK_BYTES`).
+pub const HASH_MESSAGE_PREFIX_BYTES: usize = SPX_N + SPX_PK_BYTES;
+/// PQClean `SPX_INBLOCKS * SPX_SHAX_BLOCK_BYTES` for 128s (`hash_sha2.c`).
+pub const HASH_MESSAGE_INBUF_BYTES: usize = 64;
 /// Hypertree index bit width: `SPX_TREE_HEIGHT * (SPX_D - 1)` = 9 × 6.
 pub const SPX_TREE_BITS: u32 = 54;
 /// Tree-index bytes in the MGF1 output.
@@ -50,6 +54,51 @@ pub struct HashMessageOutput {
     pub mhash: [u8; SPX_FORS_MSG_BYTES],
     pub tree: u64,
     pub leaf_idx: u32,
+}
+
+/// PQClean `hash_sha2.c:hash_message` branch for the seed SHA (`R ‖ PK ‖ M`).
+///
+/// Variable public `mlen` in one universal circuit must mux between these paths and align
+/// compression count with the folded trace. See `docs/VARIABLE_MLEN.md`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HashMessageSeedPath {
+    /// `48 + mlen < 64` — single `shaX_inc_finalize` on `R ‖ PK ‖ M`.
+    ShortFinalize,
+    /// One `shaX_inc_blocks` on a padded 64-byte buffer, then `shaX_inc_finalize` on `M` tail.
+    LongBlockThenFinalize,
+}
+
+/// Which PQClean branch applies at synthesis / prove time for message length `mlen`.
+pub fn hash_message_seed_path(mlen: usize) -> HashMessageSeedPath {
+    if HASH_MESSAGE_PREFIX_BYTES + mlen < HASH_MESSAGE_INBUF_BYTES {
+        HashMessageSeedPath::ShortFinalize
+    } else {
+        HashMessageSeedPath::LongBlockThenFinalize
+    }
+}
+
+/// Message bytes absorbed into the first full 64-byte block (long path only).
+pub fn hash_message_first_block_message_bytes(mlen: usize) -> usize {
+    HASH_MESSAGE_INBUF_BYTES
+        .saturating_sub(HASH_MESSAGE_PREFIX_BYTES)
+        .min(mlen)
+}
+
+/// Message bytes hashed in the `inc_finalize` tail (long path only).
+pub fn hash_message_tail_message_bytes(mlen: usize) -> usize {
+    match hash_message_seed_path(mlen) {
+        HashMessageSeedPath::ShortFinalize => 0,
+        HashMessageSeedPath::LongBlockThenFinalize => {
+            mlen.saturating_sub(hash_message_first_block_message_bytes(mlen))
+        }
+    }
+}
+
+/// Rough compression budget for `hash_message` (seed + MGF1), per [FOLDING.md](../../docs/FOLDING.md).
+///
+/// Exact counts should be confirmed against PQClean instrumentation before trace linking.
+pub fn hash_message_compression_budget(mlen: usize) -> usize {
+    2 + mlen.div_ceil(64)
 }
 
 /// `mgf1_256` — expand `seed` to `out.len()` bytes. Matches `hash_sha2.c:mgf1_256`.
@@ -516,6 +565,22 @@ mod tests {
         assert_eq!(parsed.mhash, oracle.mhash);
         assert_eq!(parsed.tree, oracle.tree);
         assert_eq!(parsed.leaf_idx, oracle.leaf_idx);
+    }
+
+    #[test]
+    fn hash_message_seed_path_boundaries() {
+        assert_eq!(hash_message_seed_path(15), HashMessageSeedPath::ShortFinalize);
+        assert_eq!(hash_message_seed_path(16), HashMessageSeedPath::LongBlockThenFinalize);
+        assert_eq!(hash_message_first_block_message_bytes(16), 16);
+        assert_eq!(hash_message_tail_message_bytes(16), 0);
+        assert_eq!(hash_message_first_block_message_bytes(100), 16);
+        assert_eq!(hash_message_tail_message_bytes(100), 84);
+    }
+
+    #[test]
+    fn hash_message_compression_budget_grows_with_mlen() {
+        assert!(hash_message_compression_budget(0) < hash_message_compression_budget(128));
+        assert!(hash_message_compression_budget(128) <= hash_message_compression_budget(512));
     }
 
     #[test]

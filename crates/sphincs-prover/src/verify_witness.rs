@@ -171,4 +171,14 @@ mod tests {
         assert!(core.signature.is_some());
         assert!(!core.public_io);
     }
+
+    #[test]
+    fn fold_verify_core_from_pqclean_with_public_io() {
+        let seed = [2u8; CRYPTO_SEEDBYTES];
+        let msg = b"witness builder public io";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+        let core = fold_verify_core_from_pqclean(pk, sig, msg, vec![]).with_public_io();
+        assert!(core.public_io);
+        assert_eq!(core.phase, crate::verify_core::VerifyCorePhase::Full);
+    }
 }

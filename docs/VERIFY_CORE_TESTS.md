@@ -87,6 +87,7 @@ cargo test -p sphincs-circuit wrong_hm_mgf
 |------|----------------|
 | `parsed_output_matches_native` | `synthesize_hash_message_parsed` + `parse_mgf_output` agree with PQClean |
 | `hash_message_public_preimage_matches_native` | SHA preimage `R‖PK‖M` built from **public** columns, not witness-only bytes |
+| `hash_message_seed_path_boundaries` | PQClean short vs long branch at `mlen=15/16` |
 | `native_matches_pqclean_short_message` | Native `hash_message` matches PQClean reference |
 | `wrong_hm_mgf_unsatisfies` (in `hash_msg`) | Corrupt MGF1 witness breaks constraints |
 
@@ -201,6 +202,9 @@ cargo test -p sphincs-prover --features pqclean --release \
 ```bash
 cargo test -p sphincs-prover --features pqclean --release \
   --test fold_verify_core_full fold_verify_core_full_public_io_setup -- --ignored --nocapture
+
+cargo test -p sphincs-prover --features pqclean --release \
+  --test fold_verify_core_full fold_verify_core_full_public_io_smoke -- --ignored --nocapture
 ```
 
 `fold_verify_core_from_pqclean(...).with_public_io()` — full gadget + 1033 public scalars.
@@ -219,6 +223,7 @@ cargo test -p sphincs-prover --features pqclean --release \
 | `fold_verify_core_full_smoke` | prove + verify | End-to-end with bound steps + shared links |
 | `fold_verify_core_full_plain_steps` | prove + verify | Full core + plain steps (no shared) |
 | `fold_verify_core_full_public_io_setup` | `setup` | Full core + `public_io` shape |
+| `fold_verify_core_full_public_io_smoke` | prove + verify | Full core + `public_io` end-to-end |
 
 **Env:** `FOLD_VERIFY_CORE_STEPS` (default `4`, must be power of two ≥ 2).
 

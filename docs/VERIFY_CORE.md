@@ -11,7 +11,7 @@ This document describes **Phase 2** of porting the M2 verify gadgets (`sphincs-c
 - **Done (step 1b):** `hash_message` SHA preimage wired from public `PK` / `M` columns when `public_io` — [`hash_message_bits_from_public`](../crates/sphincs-circuit/src/hash_msg.rs), [`synthesize_hash_message_parsed_public`](../crates/sphincs-circuit/src/hash_msg.rs).
 - **Done (step 1c):** Full phase uses [`synthesize_verify_core_public`](../crates/sphincs-circuit/src/verify.rs) when `public_io` (same public preimage wiring through entire verify path).
 - **Done (step 2):** WOTS topology from chained `root_bits` via [`witness_bytes_from_bits`](../crates/sphincs-circuit/src/thash.rs) — no `intermediate_roots` field on `FoldVerifyCoreCircuit`.
-- **Remaining:** Variable public `mlen` in one universal circuit; optional in-circuit tree/leaf bit mux; max-unroll WOTS `chain_lengths`.
+- **Remaining:** Variable public `mlen` — [VARIABLE_MLEN.md](VARIABLE_MLEN.md); optional in-circuit tree/leaf bit mux; max-unroll WOTS `chain_lengths`.
 
 ---
 
@@ -90,7 +90,7 @@ Rollout is deliberately **staged** so NeutronNova integration can be debugged be
 | **2a** | `HashMessage` | `enforce_message_padding` + `synthesize_hash_message` + shared link checks | `fold_verify_core_hash_message` | ✅ CI |
 | **2b** | `Full` | `synthesize_verify_core` (entire PQClean verify path) + shared link checks | `fold_verify_core_full_*` (`#[ignore]`, release) | ✅ setup verified |
 | **2c** | `public_io` on [`FoldVerifyCoreCircuit`] | Public `(mlen, PK, M)` via `inputize` (fixed `mlen` per instance) | `fold_verify_core_hash_message_public_io` | ✅ CI |
-| **2c+** | (future) | Variable public `mlen`, full trace KAT | TBD | Planned |
+| **2c+** | Variable public `mlen` | Muxed SHA preimage + trace compression alignment | See [VARIABLE_MLEN.md](VARIABLE_MLEN.md) | Planned |
 
 See [HACKMD §Phase 2](HACKMD_NEUTRONNOVA_PLAN.md) for the public `mlen` table.
 
@@ -165,12 +165,14 @@ cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_mes
 |-----------|------|----------------|------------|
 | `hash_msg::tests::parsed_output_matches_native` | — | Phase 2c: `synthesize_hash_message_parsed` + `parse_mgf_output` agree with PQClean | ✅ runs |
 | `hash_msg::tests::hash_message_public_preimage_matches_native` | — | SHA preimage wired from public IO columns | ✅ runs |
+| `hash_msg::tests::hash_message_seed_path_boundaries` | — | PQClean `hash_message` short/long branch boundaries | ✅ runs |
 | `verify::tests::wrong_hm_mgf_unsatisfies_parsed_hash_message` | — | Corrupt `hm_mgf` breaks `mgf_bits == hm_mgf` | ✅ runs |
 | `verify::tests::valid_signature_satisfies_core_public` | — | Full core + public-wired `hash_message` on PQClean KAT | `#[ignore]` release |
 | [`fold_verify_core_hash_message.rs`](../crates/sphincs-prover/tests/fold_verify_core_hash_message.rs) | `smoke`, `plain_steps` | Phase 2a end-to-end prove/verify | ✅ runs |
 | [`fold_verify_core_hash_message_public_io.rs`](../crates/sphincs-prover/tests/fold_verify_core_hash_message_public_io.rs) | `smoke` | Phase 2c public IO (1033 scalars) | ✅ runs |
 | [`fold_verify_core_full.rs`](../crates/sphincs-prover/tests/fold_verify_core_full.rs) | `full_setup` | Phase 2b `NeutronNovaZkSNARK::setup` (R1CS shape + equalize) | `#[ignore]` (~7 min release) |
 | | `full_public_io_setup` | Full core + `public_io` setup / equalize | `#[ignore]` release |
+| | `full_public_io_smoke` | Full core + `public_io` prove + verify | `#[ignore]` release |
 | | `full_prep_prove` | Witness generation for full core | `#[ignore]` |
 | | `full_smoke` | Full prove + verify with bound steps | `#[ignore]` |
 | | `full_plain_steps` | Full core + plain steps (no shared) | `#[ignore]` |
@@ -181,7 +183,7 @@ cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_mes
 
 ## What is NOT done yet (Phase 2c+)
 
-1. **Variable public `mlen`** — muxed preimage / incremental SHA in `hash_message_bits` (one universal circuit).
+1. **Variable public `mlen`** — design + helpers in [VARIABLE_MLEN.md](VARIABLE_MLEN.md); muxed preimage / incremental SHA in `hash_message_bits`.
 2. **In-circuit tree/leaf bit mux** — addresses still use synthesis-time constants from parsed mgf witness (optional hardening; see [CIRCUIT.md](CIRCUIT.md)).
 3. **Full trace scale** — tests use 4-step chain prefix, not ~2k compressions.
 4. **Trace ↔ core SHA linking** — `synthesize_verify_core` still uses in-gadget SHA for `hash_message` / `thash`; compression trace rows are not yet equated to folded step outputs inside the core (shared links pin digests only at chain boundaries).
@@ -201,3 +203,4 @@ cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_mes
 | `crates/sphincs-prover/tests/fold_verify_core_hash_message_public_io.rs` | Phase 2c public IO NeutronNova test |
 | `crates/sphincs-prover/tests/fold_verify_core_full.rs` | Phase 2b NeutronNova tests |
 | `docs/VERIFY_CORE_TESTS.md` | **Test guide** — commands, tiers, per-test descriptions |
+| `docs/VARIABLE_MLEN.md` | Variable public `mlen` design + PQClean branch helpers |

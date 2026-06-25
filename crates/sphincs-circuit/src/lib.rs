@@ -29,9 +29,12 @@ pub use fors::{
 };
 /// `hash_message` gadgets and Phase 2c parse helpers (`parse_mgf_output`, `synthesize_hash_message_parsed`).
 pub use hash_msg::{
+    hash_message_compression_budget, hash_message_first_block_message_bytes,
     hash_message_mgf_buf, hash_message_native, hash_message_output_from_mgf_bits,
-    parse_mgf_output, synthesize_hash_message, synthesize_hash_message_parsed,
-    synthesize_hash_message_parsed_public, HashMessageOutput, SPX_DGST_BYTES,
+    hash_message_seed_path, hash_message_tail_message_bytes, parse_mgf_output,
+    synthesize_hash_message, synthesize_hash_message_parsed, synthesize_hash_message_parsed_public,
+    HashMessageOutput, HashMessageSeedPath, SPX_DGST_BYTES, HASH_MESSAGE_INBUF_BYTES,
+    HASH_MESSAGE_PREFIX_BYTES,
 };
 pub use hypertree::{
     hypertree_layer_bits, hypertree_layer_from_root_bits, synthesize_hypertree_layer,

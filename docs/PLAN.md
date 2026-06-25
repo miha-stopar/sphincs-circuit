@@ -170,7 +170,8 @@ No trusted setup. Groth16 not used.
 - [x] Drop separate `hm_expected` — parse from `hm_mgf` witness (`synthesize_hash_message_parsed`)
 - [x] Drop `intermediate_roots` — WOTS topology from witness `root_bits` (`witness_bytes_from_bits`)
 - [x] Public Spartan IO (fixed per instance) — `with_public_io`, `verify_public_io`, `fold_verify_core_hash_message_public_io`
-- [ ] Variable public `mlen` in one universal circuit
+- [x] Full verify + public IO path — `synthesize_verify_core_public`, `fold_verify_core_full_public_io_*` (`#[ignore]`)
+- [ ] Variable public `mlen` in one universal circuit — [VARIABLE_MLEN.md](VARIABLE_MLEN.md)
 - [ ] Close remaining synthesis-time hint gaps — optional in-circuit tree/leaf mux, max-unroll WOTS
 - [x] Bench harness: `cargo run -p sphincs-prover --features pqclean --release --bin fold-bench -- N`
 - [ ] Benchmark: full trace prove/verify vs native verify

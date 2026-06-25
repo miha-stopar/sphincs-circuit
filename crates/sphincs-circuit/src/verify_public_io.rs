@@ -291,6 +291,111 @@ where
     Ok(is_short)
 }
 
+/// `mlen >= k` for public `mlen` (assumes [`enforce_public_mlen_in_range`]).
+pub fn public_mlen_geq_constant<Scalar, CS>(
+    mut cs: CS,
+    mlen: &UInt32,
+    k: u32,
+) -> Result<Boolean, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    if k == 0 {
+        return Ok(Boolean::constant(true));
+    }
+    if k > MESSAGE_MAX_BYTES as u32 {
+        return Ok(Boolean::constant(false));
+    }
+    let bits = mlen.clone().into_bits();
+    let width = 13usize;
+    let mut eq = Boolean::constant(true);
+    let mut gt = Boolean::constant(false);
+    for i in (0..width).rev() {
+        let a_i = &bits[i];
+        let k_i = Boolean::constant((k >> i) & 1 == 1);
+        let a_gt_k = Boolean::and(
+            cs.namespace(|| format!("mlen_gt_{i}")),
+            a_i,
+            &k_i.not(),
+        )?;
+        let gt_here = Boolean::and(cs.namespace(|| format!("mlen_gt_eq_{i}")), &eq, &a_gt_k)?;
+        gt = Boolean::or(cs.namespace(|| format!("mlen_gt_acc_{i}")), &gt, &gt_here)?;
+        let eq_i = Boolean::xor(cs.namespace(|| format!("mlen_eq_xor_{i}")), a_i, &k_i)?.not();
+        eq = Boolean::and(cs.namespace(|| format!("mlen_eq_acc_{i}")), &eq, &eq_i)?;
+    }
+    Boolean::or(cs.namespace(|| "mlen_geq"), &gt, &eq)
+}
+
+/// Byte `byte_idx` is active in the padded message (`byte_idx < mlen`).
+pub fn public_mlen_byte_active<Scalar, CS>(
+    mut cs: CS,
+    mlen: &UInt32,
+    byte_idx: usize,
+) -> Result<Boolean, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert!(byte_idx < MESSAGE_MAX_BYTES);
+    public_mlen_geq_constant(
+        cs.namespace(|| format!("byte_active_{byte_idx}")),
+        mlen,
+        (byte_idx + 1) as u32,
+    )
+}
+
+fn boolean_mux<Scalar, CS>(
+    mut cs: CS,
+    cond: &Boolean,
+    when_true: &Boolean,
+    when_false: &Boolean,
+) -> Result<Boolean, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let t = Boolean::and(cs.namespace(|| "mux_t"), cond, when_true)?;
+    let f = Boolean::and(cs.namespace(|| "mux_f"), &cond.not(), when_false)?;
+    Boolean::or(cs.namespace(|| "mux_or"), &t, &f)
+}
+
+/// Mask public message SHA bits to zero past public `mlen` (byte-granular).
+///
+/// Step D toward variable public `mlen`: inactive bytes are forced to zero before SHA preimage
+/// wiring. Preimage **length** is still bounded by synthesis-time `circuit_mlen`.
+///
+/// # Testing
+///
+/// ```bash
+/// cargo test -p sphincs-circuit public_message_bits_for_mlen
+/// ```
+pub fn public_message_bits_for_mlen<Scalar, CS>(
+    mut cs: CS,
+    mlen: &UInt32,
+    msg_bits: &[Boolean],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(msg_bits.len(), MESSAGE_MAX_BYTES * 8);
+    let mut out = Vec::with_capacity(msg_bits.len());
+    for byte_idx in 0..MESSAGE_MAX_BYTES {
+        let active = public_mlen_byte_active(cs.namespace(|| format!("bact_{byte_idx}")), mlen, byte_idx)?;
+        for bit_in_byte in 0..8 {
+            let p = byte_idx * 8 + bit_in_byte;
+            out.push(boolean_mux(
+                cs.namespace(|| format!("mb_{p}")),
+                &active,
+                &msg_bits[p],
+                &Boolean::constant(false),
+            )?);
+        }
+    }
+    Ok(out)
+}
+
 /// SHA-256 preimage bit order (MSB-first per byte) for one big-endian `u32` limb.
 fn u32_word_sha_bits(word: &UInt32) -> Vec<Boolean> {
     let le = word.clone().into_bits();
@@ -495,6 +600,26 @@ mod tests {
         let input = inputize_verify_public(&mut cs, &public).expect("inputize");
         enforce_public_mlen_in_range(&mut cs, &input).expect("range");
         assert!(!cs.is_satisfied());
+    }
+
+    #[test]
+    fn public_message_bits_for_mlen_zeros_inactive_bytes() {
+        let pk = [0xaa_u8; SPHINCS_PK_BYTES];
+        let mut stmt = VerifyPublic::from_message(pk, b"abcde");
+        stmt.message[10] = 0x42;
+        let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        let mlen_u32 = public_mlen_as_u32(&mut cs, &input).expect("mlen");
+        let raw = public_message_sha_bits(&mut cs, &input.message_words, &stmt.message).expect("raw");
+        let masked = public_message_bits_for_mlen(&mut cs, &mlen_u32, &raw).expect("masked");
+        for (i, bit) in masked.iter().enumerate().skip(stmt.mlen * 8) {
+            assert!(
+                !bit.get_value().unwrap_or(true),
+                "inactive bit {i} must be false"
+            );
+        }
+        assert!(cs.is_satisfied());
     }
 
     #[test]

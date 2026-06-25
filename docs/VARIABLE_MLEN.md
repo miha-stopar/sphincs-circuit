@@ -1,6 +1,6 @@
 # Variable public `mlen` — design notes (Phase 2c+)
 
-**Status:** step C landed (short/long mux); fixed `circuit_mlen` per instance still required for preimage sizes. Steps D–E remain.
+**Status:** steps C–D landed; preimage **length** still fixed per `circuit_mlen` instance. Step E (trace alignment) remains.
 
 **Related:** [VERIFY_CORE.md](VERIFY_CORE.md) · [FOLDING.md](FOLDING.md) §4.2 · [HACKMD_NEUTRONNOVA_PLAN.md](HACKMD_NEUTRONNOVA_PLAN.md) §Phase 2 `mlen` table
 
@@ -96,7 +96,7 @@ Already enforced: [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circ
 | **A** (done) | `hash_message_seed_path` + helpers | `hash_message_seed_path_boundaries` |
 | **B** (done) | In-circuit `mlen` range check on public scalar | `enforce_public_mlen_in_range` |
 | **C** (done) | Mux short/long native SHA paths in R1CS (no trace yet) | `hash_message_variable_mlen_matches_native` |
-| **D** | Wire variable path through `synthesize_verify_core_public` | `valid_signature_satisfies_core_variable_mlen` |
+| **D** (done) | Public `mlen` masks inactive message bytes in SHA preimage + full core test | `valid_signature_satisfies_core_variable_mlen`, `public_message_bits_for_mlen` |
 | **E** | Trace compression count selector | integration with `fold_verify_core_*` |
 
 Do **not** block Phase 2b/full-core KATs on step E — fixed-`mlen` instances remain valid deployment mode.

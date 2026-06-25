@@ -12,8 +12,7 @@ This document describes **Phase 2** of porting the M2 verify gadgets (`sphincs-c
 - **Done (step 1c):** Full phase uses [`synthesize_verify_core_public`](../crates/sphincs-circuit/src/verify.rs) when `public_io` (same public preimage wiring through entire verify path).
 - **Done (step 2):** WOTS topology from chained `root_bits` via [`witness_bytes_from_bits`](../crates/sphincs-circuit/src/thash.rs) — no `intermediate_roots` field on `FoldVerifyCoreCircuit`.
 - **Done (variable `mlen` step B):** [`enforce_public_mlen_in_range`](../crates/sphincs-circuit/src/verify_public_io.rs) — public `mlen ≤ MESSAGE_MAX_BYTES` in R1CS.
-- **Done (variable `mlen` step C):** short/long `hash_message` seed SHA mux via [`hash_message_bits_from_public_muxed`](../crates/sphincs-circuit/src/hash_msg.rs) + [`public_mlen_is_short_path`](../crates/sphincs-circuit/src/verify_public_io.rs).
-- **Remaining:** Variable `mlen` steps D–E ([VARIABLE_MLEN.md](VARIABLE_MLEN.md)); optional in-circuit tree/leaf bit mux; max-unroll WOTS `chain_lengths`.
+- **Done (variable `mlen` step D):** [`public_message_bits_for_mlen`](../crates/sphincs-circuit/src/verify_public_io.rs) masks inactive message bytes from public `mlen`; full core test `valid_signature_satisfies_core_variable_mlen`.
 
 ---
 

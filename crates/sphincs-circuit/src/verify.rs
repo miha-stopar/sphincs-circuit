@@ -429,6 +429,60 @@ mod tests {
         assert!(cs.is_satisfied());
     }
 
+    /// Full verify core + public IO + muxed `hash_message` at multiple `mlen` values (slow).
+    ///
+    /// Step D: exercises [`synthesize_verify_core_public`] with short and long PQClean branches.
+    ///
+    /// ```bash
+    /// cargo test -p sphincs-circuit valid_signature_satisfies_core_variable_mlen --release -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "full verify core variable mlen public_io is slow; run with --release --ignored"]
+    fn valid_signature_satisfies_core_variable_mlen() {
+        use circuit_spec::VerifyPublic;
+        use crate::verify_public_io::{
+            enforce_public_inactive_chunks_zero, enforce_public_mlen_in_range,
+            inputize_verify_public, pack_verify_public,
+        };
+
+        let cases: &[(usize, &[u8])] = &[
+            (5, b"short"),
+            (16, b"sixteen bytes!!!"),
+            (100, &[0xcd; 100][..]),
+        ];
+
+        for &(mlen, msg) in cases {
+            let seed = [0xacu8; CRYPTO_SEEDBYTES];
+            let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+            let r = {
+                let mut a = [0u8; 16];
+                a.copy_from_slice(&sig[..16]);
+                a
+            };
+            let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+            let mut padded = [0u8; MESSAGE_MAX_BYTES];
+            padded[..mlen].copy_from_slice(msg);
+            let stmt = VerifyPublic::from_message(pk, msg);
+            let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, mlen);
+
+            let mut cs = TestConstraintSystem::<Fr>::new();
+            let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+            enforce_public_mlen_in_range(&mut cs, &input).expect("range");
+            enforce_public_inactive_chunks_zero(&mut cs, &input, mlen).expect("tail");
+            synthesize_verify_core_public(
+                &mut cs,
+                &input,
+                &pk,
+                &padded,
+                mlen,
+                &sig,
+                &hm_mgf,
+            )
+            .expect("synth");
+            assert!(cs.is_satisfied(), "mlen={mlen}");
+        }
+    }
+
     #[test]
     fn message_padding_rejects_nonzero_tail_at_synthesis() {
         let mut padded = [0u8; MESSAGE_MAX_BYTES];

@@ -21,7 +21,8 @@
 use crate::fors::SPX_FORS_MSG_BYTES;
 use crate::thash::{alloc_input_bits, enforce_bits_equal_bytes, SPX_N};
 use crate::verify_public_io::{
-    public_message_sha_bits, public_mlen_is_short_path, public_pk_sha_bits, InputizedVerifyPublic,
+    public_message_bits_for_mlen, public_message_sha_bits, public_mlen_as_u32,
+    public_mlen_is_short_path, public_pk_sha_bits, InputizedVerifyPublic,
 };
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper::gadgets::sha256::sha256;
@@ -442,24 +443,36 @@ where
         &public.message_words,
         message,
     )?;
+    let mlen_u32 = public_mlen_as_u32(cs.namespace(|| "mlen_u32"), public)?;
+    let active_msg_bits = public_message_bits_for_mlen(
+        cs.namespace(|| "active_msg"),
+        &mlen_u32,
+        &msg_bits,
+    )?;
 
     let r_bits: Vec<Boolean> = bytes_to_bits_be(r).into_iter().map(Boolean::constant).collect();
 
     // Short path: SHA256(R ‖ PK ‖ M[0..circuit_mlen]).
     let mut short_preimage = r_bits.clone();
     short_preimage.extend(pk_bits.iter().cloned());
-    short_preimage.extend(msg_bits.iter().take(circuit_mlen * 8).cloned());
+    short_preimage.extend(active_msg_bits.iter().take(circuit_mlen * 8).cloned());
     let short_seed = sha256(cs.namespace(|| "hm_seed_short"), &short_preimage)?;
 
     // Long path: SHA256( 64-byte block ‖ M[16..circuit_mlen] ).
     let first_block = HASH_MESSAGE_INBUF_BYTES - HASH_MESSAGE_PREFIX_BYTES;
     let mut block64 = r_bits;
     block64.extend(pk_bits.iter().cloned());
-    block64.extend(msg_bits.iter().take(first_block * 8).cloned());
+    block64.extend(active_msg_bits.iter().take(first_block * 8).cloned());
     assert_eq!(block64.len(), HASH_MESSAGE_INBUF_BYTES * 8);
     let tail_len = circuit_mlen.saturating_sub(first_block);
     let mut long_preimage = block64;
-    long_preimage.extend(msg_bits.iter().skip(first_block * 8).take(tail_len * 8).cloned());
+    long_preimage.extend(
+        active_msg_bits
+            .iter()
+            .skip(first_block * 8)
+            .take(tail_len * 8)
+            .cloned(),
+    );
     let long_seed = sha256(cs.namespace(|| "hm_seed_long"), &long_preimage)?;
 
     let is_short = public_mlen_is_short_path(cs.namespace(|| "mlen_mux"), public)?;

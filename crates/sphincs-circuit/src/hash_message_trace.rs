@@ -3,11 +3,20 @@
 //! Locates the seed-SHA and MGF1 local chains in a verify trace and provides
 //! exact compression counts from SHA-256 padding math (validated against PQClean).
 
+use bellpepper::gadgets::boolean::Boolean;
+use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use circuit_spec::{Sha256Compression, SPHINCS_PK_BYTES};
+use ff::PrimeField;
+
 use crate::hash_msg::{
-    hash_message_seed_path, hash_message_tail_message_bytes,
-    HashMessageSeedPath, HASH_MESSAGE_INBUF_BYTES, HASH_MESSAGE_PREFIX_BYTES, SPX_PK_BYTES,
+    hash_message_seed_path, hash_message_tail_message_bytes, mgf1_digest_bits, HashMessageSeedPath,
+    HASH_MESSAGE_INBUF_BYTES, HASH_MESSAGE_PREFIX_BYTES, SPX_DGST_BYTES, SPX_PK_BYTES,
 };
+use crate::thash::enforce_bits_equal_bytes;
+use crate::sha256_compress::{
+    sha256_state_words_to_bits_be, synthesize_compression_chain_for_fold_with_shared,
+};
+use crate::step::StepInput;
 use crate::thash::SPX_N;
 use crate::witness::LocalChain;
 
@@ -163,6 +172,44 @@ pub fn locate_hash_message_trace_span_for_mlen(
     Some(span)
 }
 
+fn constant_bits(bytes: &[u8]) -> Vec<Boolean> {
+    bytes
+        .iter()
+        .flat_map(|byte| (0..8).rev().map(move |i| Boolean::constant((byte >> i) & 1 == 1)))
+        .collect()
+}
+
+/// `hash_message` with seed-SHA from folded trace rows wired to NeutronNova `shared` links.
+///
+/// MGF1 still uses the one-shot bellpepper SHA gadget. `seed_rows.len()` must be ≥ 2 and
+/// `shared.len() == (seed_rows.len() - 1) * DIGEST_WORDS`.
+pub fn synthesize_hash_message_with_seed_trace<Scalar, CS>(
+    mut cs: CS,
+    r: &[u8; SPX_N],
+    pk: &[u8; SPHINCS_PK_BYTES],
+    seed_rows: &[StepInput],
+    expected_mgf: &[u8; SPX_DGST_BYTES],
+    shared: &[AllocatedNum<Scalar>],
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let final_words = synthesize_compression_chain_for_fold_with_shared(
+        cs.namespace(|| "seed_chain"),
+        seed_rows,
+        shared,
+    )?;
+
+    let mut seed_bits = constant_bits(r);
+    seed_bits.extend(constant_bits(&pk[..SPX_N]));
+    seed_bits.extend(sha256_state_words_to_bits_be(&final_words));
+
+    let mgf_bits = mgf1_digest_bits(cs.namespace(|| "mgf1"), &seed_bits, SPX_DGST_BYTES)?;
+    enforce_bits_equal_bytes(cs.namespace(|| "mgf_out"), &mgf_bits, expected_mgf)?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,7 +246,7 @@ mod tests {
         assert_eq!(hash_message_seed_compression_count(15), 2);
         assert_eq!(hash_message_seed_compression_count(16), 2);
         assert_eq!(
-            hash_message_first_block_message_bytes(16),
+            crate::hash_msg::hash_message_first_block_message_bytes(16),
             HASH_MESSAGE_INBUF_BYTES - HASH_MESSAGE_PREFIX_BYTES
         );
     }
@@ -232,6 +279,40 @@ mod tests {
         assert!(
             hash_message_compression_count_exact(128) <= hash_message_compression_count_exact(512)
         );
+    }
+
+    #[test]
+    fn hash_message_seed_trace_linked_satisfies() {
+        use bellpepper_core::test_cs::TestConstraintSystem;
+        use blstrs::Scalar as Fr;
+        use crate::hash_msg::hash_message_mgf_buf;
+        use crate::shared_link::alloc_digest_shared;
+        use crate::witness::step_input_from_row;
+
+        let msg = vec![0u8; 15];
+        let (pk, r, rows) = trace_rows(&msg);
+        let span = locate_hash_message_trace_span_for_mlen(&rows, &r, &pk, 15).expect("span");
+        let seed_inputs: Vec<StepInput> = rows[span.seed.start..=span.seed.end]
+            .iter()
+            .map(step_input_from_row)
+            .collect();
+        assert_eq!(seed_inputs.len(), 2);
+
+        let hm_mgf = hash_message_mgf_buf(&r, &pk, &msg, 15);
+        let link = rows[span.seed.start].h_out;
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let shared = alloc_digest_shared(&mut cs, "link0", link).expect("shared");
+        synthesize_hash_message_with_seed_trace(
+            &mut cs,
+            &r,
+            &pk,
+            &seed_inputs,
+            &hm_mgf,
+            &shared,
+        )
+        .expect("synth");
+        assert!(cs.is_satisfied());
     }
 
     #[test]

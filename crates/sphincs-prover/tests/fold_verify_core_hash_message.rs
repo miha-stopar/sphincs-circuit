@@ -21,6 +21,7 @@
 
 use circuit_spec::Sha256Compression;
 use sphincs_circuit::hash_message_mgf_buf;
+use sphincs_circuit::witness::step_input_from_row;
 use sphincs_prover::{
     fold_and_prove, hash_message_chain_prefix, hash_message_compression_count_exact,
     hash_message_seed_chain_bound, longest_chain_bound, padded_message, setup_with_proto, sig_r,
@@ -101,7 +102,12 @@ fn fold_verify_core_hash_message_seed_chain_bound_smoke() {
 
     let digests: Vec<_> = links.iter().map(|(left, _)| *left).collect();
     let hm_mgf = hash_message_mgf_buf(&r, &pk, &msg, mlen);
-    let core = FoldVerifyCoreCircuit::hash_message(pk, message, mlen, r, hm_mgf, digests);
+    let seed_inputs: Vec<_> = rows[span.seed.start..=span.seed.end]
+        .iter()
+        .map(step_input_from_row)
+        .collect();
+    let core = FoldVerifyCoreCircuit::hash_message(pk, message, mlen, r, hm_mgf, digests)
+        .with_seed_trace(seed_inputs);
 
     let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
     let proof = fold_and_prove(&pk_fold, &steps, &core);

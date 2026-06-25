@@ -92,6 +92,7 @@ cargo test -p sphincs-circuit wrong_hm_mgf
 | `hash_message_seed_path_boundaries` | PQClean short vs long branch at `mlen=15/16` |
 | `hash_message_variable_mlen_matches_native` | Short/long muxed public `hash_message` at mlen 5 / 16 / 100 |
 | `hash_message_compression_count_exact_matches_pqclean_trace` | Analytic seed+MGF1 compression counts match PQClean trace span (step E) |
+| `hash_message_seed_trace_linked_satisfies` | Core seed chain + MGF1 via shared link variables (step E++) |
 | `hash_message_seed_paths_match_native` | Native long vs short seed hash agrees with single-shot SHA |
 | `native_matches_pqclean_short_message` | Native `hash_message` matches PQClean reference |
 | `wrong_hm_mgf_unsatisfies` (in `hash_msg`) | Corrupt MGF1 witness breaks constraints |
@@ -135,7 +136,7 @@ cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_mes
 |------|----------------|
 | `fold_verify_core_hash_message_smoke` | Bound folded steps + `C_core` running **only** `hash_message` → NeutronNova prove + verify |
 | `fold_verify_core_hash_message_plain_steps` | Same core with **plain** steps (no shared link digests) — isolates core size |
-| `fold_verify_core_hash_message_seed_chain_bound_smoke` | Bound steps over **seed-SHA** rows from located `hash_message` span (`mlen=15` → 2 steps) |
+| `fold_verify_core_hash_message_seed_chain_bound_smoke` | Bound steps over **seed-SHA** rows from located span + `with_seed_trace` core linking |
 | `fold_verify_core_hash_message_trace_span_plain_steps` | Plain fold over full span (seed + MGF1 rows); verifies trace row selection |
 
 **Env:** `FOLD_VERIFY_CORE_STEPS` — power-of-two step count (default `4`).

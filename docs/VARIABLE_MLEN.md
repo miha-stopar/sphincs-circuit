@@ -101,7 +101,8 @@ Already enforced: [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circ
 | **D** (done) | Public `mlen` masks inactive message bytes in SHA preimage + full core test | `valid_signature_satisfies_core_variable_mlen`, `public_message_bits_for_mlen` |
 | **E** (partial) | Exact compression counts + trace span location | `hash_message_compression_count_exact`, `hash_message_compression_count_exact_matches_pqclean_trace` |
 | **E+** (partial) | Prover selects `hash_message` trace rows for fold | `hash_message_seed_chain_bound`, `fold_verify_core_hash_message_seed_chain_bound_smoke` |
-| **E++** | Equate core in-gadget SHA to folded step outputs | `fold_verify_core_*` full span linking |
+| **E++** (partial) | Core seed-SHA wired to shared fold links | `synthesize_hash_message_with_seed_trace`, `FoldVerifyCoreCircuit::with_seed_trace` |
+| **E+++** | MGF1 + full verify trace linking | `fold_verify_core_*` full span |
 
 Do **not** block Phase 2b/full-core KATs on step E — fixed-`mlen` instances remain valid deployment mode.
 

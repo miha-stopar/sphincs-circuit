@@ -306,6 +306,69 @@ where
     Ok(())
 }
 
+/// Like [`synthesize_compression_chain_for_fold`], but internal boundaries are wired to
+/// NeutronNova `shared` link limbs (same variables as [`FoldStepBoundCircuit`]).
+///
+/// Returns the final compression output words (SHA-256 state after the last row).
+pub fn synthesize_compression_chain_for_fold_with_shared<Scalar, CS>(
+    mut cs: CS,
+    rows: &[crate::step::StepInput],
+    shared: &[bellpepper_core::num::AllocatedNum<Scalar>],
+) -> Result<Vec<UInt32>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    use crate::chain::enforce_sha256_words_equal;
+    use crate::shared_link::{enforce_words_eq_shared, link_shared_slice, DIGEST_WORDS};
+
+    assert!(rows.len() >= 2);
+    assert_eq!(shared.len(), (rows.len() - 1) * DIGEST_WORDS);
+
+    let block_bits_0 = block_to_allocated_bits(cs.namespace(|| "block_0"), &rows[0].block)?;
+    let mut h_words = words_from_state_bytes(cs.namespace(|| "h_in_0"), "h_in_0", &rows[0].h_in)?;
+    let mut out_words = sha256_compression_function(
+        cs.namespace(|| "compress_0"),
+        &block_bits_0,
+        &h_words,
+    )?;
+
+    for (i, row) in rows.iter().enumerate().skip(1) {
+        enforce_words_eq_shared(
+            cs.namespace(|| format!("shared_link_{}", i - 1)),
+            "h_out",
+            &out_words,
+            link_shared_slice(shared, i - 1),
+        )?;
+        h_words = out_words;
+        let block_bits =
+            block_to_allocated_bits(cs.namespace(|| format!("block_{i}")), &row.block)?;
+        out_words = sha256_compression_function(
+            cs.namespace(|| format!("compress_{i}")),
+            &block_bits,
+            &h_words,
+        )?;
+    }
+
+    let expected = words_from_state_bytes(
+        cs.namespace(|| "h_out_last"),
+        "h_out_last",
+        &rows[rows.len() - 1].h_out,
+    )?;
+    enforce_sha256_words_equal(cs.namespace(|| "last_out_eq"), &out_words, &expected)?;
+
+    Ok(out_words)
+}
+
+/// Big-endian bit decomposition of eight SHA state `u32` limbs (256 bits).
+pub fn sha256_state_words_to_bits_be(words: &[UInt32]) -> Vec<Boolean> {
+    let mut bits = Vec::with_capacity(256);
+    for word in words {
+        bits.extend(word.clone().into_bits_be());
+    }
+    bits
+}
+
 /// Like [`synthesize_compression`], but allocate the 512 block bits as witnesses.
 ///
 /// Uses allocated expected `h_out` words (for oracle tests on T256). Not compatible

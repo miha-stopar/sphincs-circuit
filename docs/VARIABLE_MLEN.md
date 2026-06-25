@@ -52,7 +52,7 @@ cargo test -p sphincs-circuit hash_message_seed_path
 ### 1. In-circuit `mlen` from public IO
 
 - Read `input.mlen` as `UInt32` (already inputized).
-- Range-check `mlen ≤ MESSAGE_MAX_BYTES` (bit decomposition or comparison gadget).
+- Range-check `mlen ≤ MESSAGE_MAX_BYTES` — [`enforce_public_mlen_in_range`](../crates/sphincs-circuit/src/verify_public_io.rs) (wired in `FoldVerifyCoreCircuit` when `public_io`).
 - Drop synthesis-time `enforce_public_matches_statement` equality to a **constant** `mlen`; instead tie gadget behavior to **public** `mlen`.
 
 ### 2. Variable-length SHA preimage
@@ -94,7 +94,7 @@ Already enforced: [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circ
 | Step | Deliverable | Test |
 |------|-------------|------|
 | **A** (done) | `hash_message_seed_path` + helpers | `hash_message_seed_path_boundaries` |
-| **B** | In-circuit `mlen` range check on public scalar | unit test in `verify_public_io` |
+| **B** (done) | In-circuit `mlen` range check on public scalar | `enforce_public_mlen_in_range` |
 | **C** | Mux short/long native SHA paths in R1CS (no trace yet) | `hash_message_variable_mlen_matches_native` |
 | **D** | Wire variable path through `synthesize_verify_core_public` | `valid_signature_satisfies_core_variable_mlen` |
 | **E** | Trace compression count selector | integration with `fold_verify_core_*` |

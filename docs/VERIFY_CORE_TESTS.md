@@ -70,7 +70,8 @@ cargo test -p sphincs-circuit verify_public_io
 |------|----------------|
 | `pack_len_matches_layout_constant` | `pack_verify_public` length == `VERIFY_PUBLIC_NUM_SCALARS` (1033) |
 | `inputize_and_enforce_satisfies_for_honest_statement` | Honest `(mlen, PK, M)` public tuple satisfies R1CS after `inputize` |
-| `wrong_public_mlen_unsatisfies` | Wrong public `mlen` scalar breaks `enforce_public_matches_statement` |
+| `enforce_public_mlen_in_range_accepts_max_and_honest` | Honest `mlen` and `mlen = MESSAGE_MAX_BYTES` pass |
+| `enforce_public_mlen_in_range_rejects_too_large` | `mlen > MESSAGE_MAX_BYTES` fails |
 | `enforce_public_inactive_chunks_zero_accepts_honest_padding` | Zero tail on public message chunks after `mlen` passes |
 | `enforce_public_inactive_chunks_zero_rejects_nonzero_tail_chunk` | Nonzero byte in an inactive 32-byte chunk fails |
 | `public_pk_sha_bits_matches_native` | `public_pk_sha_bits` ties public PK words to assignment bytes |

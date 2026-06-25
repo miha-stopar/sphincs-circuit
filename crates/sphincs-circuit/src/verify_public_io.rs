@@ -187,6 +187,82 @@ where
     Ok(())
 }
 
+fn scalar_u32_hint<Scalar: PrimeField>(s: Scalar) -> Option<u32> {
+    let repr = s.to_repr();
+    let bytes = repr.as_ref();
+    let mut v = 0u64;
+    for (i, b) in bytes.iter().take(8).enumerate() {
+        v |= (*b as u64) << (8 * i);
+    }
+    (v <= u32::MAX as u64).then(|| v as u32)
+}
+
+/// Reconstruct public `mlen` as a constrained `UInt32` limb tied to `input.mlen`.
+pub fn public_mlen_as_u32<Scalar, CS>(
+    mut cs: CS,
+    input: &InputizedVerifyPublic<Scalar>,
+) -> Result<UInt32, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let hint = input.mlen.get_value().and_then(scalar_u32_hint);
+    let word = UInt32::alloc(cs.namespace(|| "pub_mlen_u32"), hint)?;
+    enforce_num_eq_u32(cs.namespace(|| "pub_mlen_u32_eq"), &input.mlen, &word)?;
+    Ok(word)
+}
+
+/// Enforce `0 ≤ public mlen ≤ MESSAGE_MAX_BYTES` (4096 for v1).
+///
+/// Step B toward variable public `mlen` — does **not** remove the fixed synthesis-time `mlen`
+/// on [`sphincs_prover::FoldVerifyCoreCircuit`]; it hardens the public scalar before mux work.
+///
+/// # Testing
+///
+/// ```bash
+/// cargo test -p sphincs-circuit enforce_public_mlen_in_range
+/// ```
+pub fn enforce_public_mlen_in_range<Scalar, CS>(
+    mut cs: CS,
+    input: &InputizedVerifyPublic<Scalar>,
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let mlen = public_mlen_as_u32(cs.namespace(|| "mlen_word"), input)?;
+    let bits = mlen.into_bits();
+    assert_eq!(bits.len(), 32);
+
+    // `mlen` must fit in 13 bits (reject `mlen >= 8192`).
+    for (i, bit) in bits.iter().enumerate().skip(13) {
+        Boolean::enforce_equal(
+            cs.namespace(|| format!("mlen_hi_zero_{i}")),
+            bit,
+            &Boolean::constant(false),
+        )?;
+    }
+
+    // If bit 12 is set (`mlen >= 4096`), lower bits must be zero (`mlen == 4096` exactly).
+    let bit12 = bits[12].clone();
+    let mut lower_active = bits[0].clone();
+    for (i, bit) in bits.iter().enumerate().take(12).skip(1) {
+        lower_active = Boolean::or(
+            cs.namespace(|| format!("mlen_lower_or_{i}")),
+            &lower_active,
+            bit,
+        )?;
+    }
+    let overflow = Boolean::and(cs.namespace(|| "mlen_overflow_4096"), &bit12, &lower_active)?;
+    Boolean::enforce_equal(
+        cs.namespace(|| "mlen_not_overflow"),
+        &overflow,
+        &Boolean::constant(false),
+    )?;
+
+    Ok(())
+}
+
 /// SHA-256 preimage bit order (MSB-first per byte) for one big-endian `u32` limb.
 fn u32_word_sha_bits(word: &UInt32) -> Vec<Boolean> {
     let le = word.clone().into_bits();
@@ -360,6 +436,36 @@ mod tests {
         let mut cs = TestConstraintSystem::<Fr>::new();
         let input = inputize_verify_public(&mut cs, &public).expect("inputize");
         enforce_public_inactive_chunks_zero(&mut cs, &input, stmt.mlen).expect("tail");
+        assert!(!cs.is_satisfied());
+    }
+
+    #[test]
+    fn enforce_public_mlen_in_range_accepts_max_and_honest() {
+        let stmt = VerifyPublic::from_message([0x77u8; 32], b"mlen range ok");
+        let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        enforce_public_mlen_in_range(&mut cs, &input).expect("range");
+        assert!(cs.is_satisfied());
+
+        let mut max_msg = [0u8; MESSAGE_MAX_BYTES];
+        max_msg[..4].copy_from_slice(b"max=");
+        let max_public = pack_verify_public::<Fr>(&stmt.pk, &max_msg, MESSAGE_MAX_BYTES);
+        let mut cs_max = TestConstraintSystem::<Fr>::new();
+        let input_max = inputize_verify_public(&mut cs_max, &max_public).expect("inputize");
+        enforce_public_mlen_in_range(&mut cs_max, &input_max).expect("range");
+        assert!(cs_max.is_satisfied());
+    }
+
+    #[test]
+    fn enforce_public_mlen_in_range_rejects_too_large() {
+        let stmt = VerifyPublic::from_message([0x88u8; 32], b"x");
+        let mut public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
+        public[0] = Fr::from((MESSAGE_MAX_BYTES + 1) as u64);
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        enforce_public_mlen_in_range(&mut cs, &input).expect("range");
         assert!(!cs.is_satisfied());
     }
 

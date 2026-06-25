@@ -48,7 +48,8 @@ use spartan2::traits::{circuit::SpartanCircuit, Engine};
 use sphincs_circuit::{
     alloc_digest_shared, enforce_bytes_eq_shared, enforce_message_padding, link_shared_slice,
     inputize_verify_public, pack_verify_public, enforce_public_matches_statement,
-    enforce_public_inactive_chunks_zero, synthesize_hash_message_parsed_public,
+    enforce_public_inactive_chunks_zero, enforce_public_mlen_in_range,
+    synthesize_hash_message_parsed_public,
     synthesize_hash_message, synthesize_verify_core, synthesize_verify_core_public,
     hash_msg::SPX_DGST_BYTES, thash::SPX_N,
 };
@@ -257,6 +258,7 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                 if self.public_io {
                     let public = self.public_values()?;
                     let input = inputize_verify_public(cs.namespace(|| "public_io"), &public)?;
+                    enforce_public_mlen_in_range(cs.namespace(|| "public_mlen_range"), &input)?;
                     enforce_message_padding(
                         cs.namespace(|| "msg_pad"),
                         &self.message,
@@ -314,6 +316,7 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                 if self.public_io {
                     let public = self.public_values()?;
                     let input = inputize_verify_public(cs.namespace(|| "public_io"), &public)?;
+                    enforce_public_mlen_in_range(cs.namespace(|| "public_mlen_range"), &input)?;
                     enforce_message_padding(
                         cs.namespace(|| "msg_pad"),
                         &self.message,

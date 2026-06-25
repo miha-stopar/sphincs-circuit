@@ -11,7 +11,8 @@ This document describes **Phase 2** of porting the M2 verify gadgets (`sphincs-c
 - **Done (step 1b):** `hash_message` SHA preimage wired from public `PK` / `M` columns when `public_io` — [`hash_message_bits_from_public`](../crates/sphincs-circuit/src/hash_msg.rs), [`synthesize_hash_message_parsed_public`](../crates/sphincs-circuit/src/hash_msg.rs).
 - **Done (step 1c):** Full phase uses [`synthesize_verify_core_public`](../crates/sphincs-circuit/src/verify.rs) when `public_io` (same public preimage wiring through entire verify path).
 - **Done (step 2):** WOTS topology from chained `root_bits` via [`witness_bytes_from_bits`](../crates/sphincs-circuit/src/thash.rs) — no `intermediate_roots` field on `FoldVerifyCoreCircuit`.
-- **Remaining:** Variable public `mlen` — [VARIABLE_MLEN.md](VARIABLE_MLEN.md); optional in-circuit tree/leaf bit mux; max-unroll WOTS `chain_lengths`.
+- **Done (variable `mlen` step B):** [`enforce_public_mlen_in_range`](../crates/sphincs-circuit/src/verify_public_io.rs) — public `mlen ≤ MESSAGE_MAX_BYTES` in R1CS.
+- **Remaining:** Variable public `mlen` mux (steps C–E in [VARIABLE_MLEN.md](VARIABLE_MLEN.md)); optional in-circuit tree/leaf bit mux; max-unroll WOTS `chain_lengths`.
 
 ---
 

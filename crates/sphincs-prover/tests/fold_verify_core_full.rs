@@ -19,6 +19,10 @@
 //! | `fold_verify_core_full_plain_steps` | prove + verify | plain `FoldStepCircuit` | no | `#[ignore]` |
 //! | `fold_verify_core_full_public_io_setup` | `setup` only | bound | yes | `#[ignore]` release |
 //! | `fold_verify_core_full_public_io_smoke` | prove + verify | bound | yes | `#[ignore]` release |
+//! | `fold_verify_core_full_trace_linked_setup` | `setup` only | `hash_message` span | no | `#[ignore]` release |
+//! | `fold_verify_core_full_public_io_trace_linked_setup` | `setup` only | `hash_message` span | no | `#[ignore]` release |
+//! | `fold_verify_core_full_public_io_trace_smoke` | prove + verify | bound | yes | `#[ignore]` release |
+//! | `fold_verify_core_full_variable_public_mlen_trace_setup` | `setup` only | `hash_message` span | no | `#[ignore]` release |
 //!
 //! # Run commands
 //!
@@ -46,8 +50,9 @@
 
 use circuit_spec::Sha256Compression;
 use sphincs_prover::{
-    fold_and_prove, fold_verify_core_from_pqclean, longest_chain_bound, setup_with_proto,
-    verify_proof,
+    fold_and_prove, fold_verify_core_from_pqclean, hash_message_full_span_plain,
+    hash_message_trace_inputs_from_kat, longest_chain_bound, padded_message, setup_with_proto,
+    sig_r, verify_proof,
 };
 use sphincs_ref::{sign_deterministic, verify_with_trace, CRYPTO_SEEDBYTES};
 
@@ -246,14 +251,126 @@ fn fold_verify_core_full_public_io_smoke() {
         VERIFY_PUBLIC_NUM_SCALARS
     );
 
-    eprintln!(
-        "full public_io smoke: steps={n} links={} trace indices {}..={}",
-        links.len(),
-        chain.start,
-        chain.end
+    let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
+    let proof = fold_and_prove(&pk_fold, &steps, &core);
+    verify_proof(&vk, &proof, steps.len());
+}
+
+/// Full core + trace-linked `hash_message` — NeutronNova `setup` / equalize only.
+#[test]
+#[ignore = "full verify core + trace setup is large; run with --release --ignored"]
+fn fold_verify_core_full_trace_linked_setup() {
+    use spartan2::neutronnova_zk::NeutronNovaZkSNARK;
+    use sphincs_prover::E;
+
+    let seed = [0x4bu8; CRYPTO_SEEDBYTES];
+    let msg = b"span";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+
+    let (_message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let (_span, steps, trace_inputs) =
+        hash_message_full_span_plain(&rows, &r, &pk, mlen).expect("hash_message span");
+
+    let core = fold_verify_core_from_pqclean(pk, sig, msg, vec![])
+        .with_hash_message_trace(trace_inputs);
+
+    NeutronNovaZkSNARK::<E>::setup(&steps[0], &core, steps.len()).expect("setup");
+}
+
+/// Full core + `public_io` + trace-linked `hash_message` — `setup` only.
+#[test]
+#[ignore = "full verify core + public_io + trace setup is large; run with --release --ignored"]
+fn fold_verify_core_full_public_io_trace_linked_setup() {
+    use circuit_spec::VERIFY_PUBLIC_NUM_SCALARS;
+    use spartan2::traits::circuit::SpartanCircuit;
+
+    let seed = [0x4cu8; CRYPTO_SEEDBYTES];
+    let msg = b"span";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+
+    let (_message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let (_span, steps, trace_inputs) =
+        hash_message_full_span_plain(&rows, &r, &pk, mlen).expect("hash_message span");
+
+    let core = fold_verify_core_from_pqclean(pk, sig, msg, vec![])
+        .with_hash_message_trace(trace_inputs)
+        .with_public_io();
+    assert_eq!(
+        core.public_values().expect("pv").len(),
+        VERIFY_PUBLIC_NUM_SCALARS
+    );
+
+    let (_pk_fold, _vk) = setup_with_proto(&steps[0], &core, steps.len());
+    eprintln!("full public_io trace setup ok: steps={}", steps.len());
+}
+
+/// Full core + `public_io` + trace — end-to-end prove + verify.
+#[test]
+#[ignore = "full verify core + public_io + trace prove is large; run with --release --ignored"]
+fn fold_verify_core_full_public_io_trace_smoke() {
+    use circuit_spec::VERIFY_PUBLIC_NUM_SCALARS;
+    use spartan2::traits::circuit::SpartanCircuit;
+
+    let seed = [0x4du8; CRYPTO_SEEDBYTES];
+    let msg = b"full core public io trace smoke";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+
+    let n = max_steps();
+    let (_chain, steps, _old, links) = longest_chain_bound(&rows, n).expect("chain");
+    let digests: Vec<_> = links.iter().map(|(l, _)| *l).collect();
+
+    let trace_inputs =
+        hash_message_trace_inputs_from_kat(&rows, &pk, &sig, msg).expect("hash_message trace");
+
+    let core = fold_verify_core_from_pqclean(pk, sig, msg, digests)
+        .with_hash_message_trace(trace_inputs)
+        .with_public_io();
+
+    assert_eq!(
+        core.public_values().expect("pv").len(),
+        VERIFY_PUBLIC_NUM_SCALARS
     );
 
     let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
     let proof = fold_and_prove(&pk_fold, &steps, &core);
     verify_proof(&vk, &proof, steps.len());
+}
+
+/// Full core + variable public `mlen` + trace — `setup` only.
+#[test]
+#[ignore = "full verify core variable mlen + trace setup is large; run with --release --ignored"]
+fn fold_verify_core_full_variable_public_mlen_trace_setup() {
+    use circuit_spec::VERIFY_PUBLIC_NUM_SCALARS;
+    use spartan2::traits::circuit::SpartanCircuit;
+
+    let seed = [0x4eu8; CRYPTO_SEEDBYTES];
+    let msg = b"span";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+
+    let (_message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let (_span, steps, trace_inputs) =
+        hash_message_full_span_plain(&rows, &r, &pk, mlen).expect("hash_message span");
+
+    let core = fold_verify_core_from_pqclean(pk, sig, msg, vec![])
+        .with_hash_message_trace(trace_inputs)
+        .with_public_io()
+        .with_variable_public_mlen();
+    assert_eq!(
+        core.public_values().expect("pv").len(),
+        VERIFY_PUBLIC_NUM_SCALARS
+    );
+
+    let (_pk_fold, _vk) = setup_with_proto(&steps[0], &core, steps.len());
+    eprintln!("full variable public mlen trace setup ok");
 }

@@ -104,7 +104,7 @@ Already enforced: [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circ
 | **E++** (done) | Core seed-SHA wired to shared fold links | `synthesize_hash_message_with_trace`, `with_seed_trace` |
 | **E+++** (done) | Full-span fold + trace-linked core (seed trace, MGF1 via fold `C_step`) | `fold_verify_core_hash_message_full_trace_linked_smoke` |
 | **F** (partial) | Public `mlen` not tied to synthesis constant; trace-linked seed + dynamic tail zero | `enforce_public_matches_pk_message`, `fold_verify_core_hash_message_variable_public_mlen_trace_smoke` |
-| **F+** (planned) | `public_io` + trace on full verify; one setup for all `mlen` topologies | — |
+| **F+** (partial) | Full core + `public_io` + trace-linked `hash_message` | `fold_verify_core_full_public_io_trace_linked_setup` |
 
 Do **not** block Phase 2b/full-core KATs on step E — fixed-`mlen` instances remain valid deployment mode.
 

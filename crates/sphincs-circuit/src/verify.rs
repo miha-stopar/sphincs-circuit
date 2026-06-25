@@ -25,6 +25,7 @@
 //! in [`crate::hypertree::hypertree_layer_from_root_bits`] — no `intermediate_roots` oracle.
 
 use crate::fors::{fors_pk_from_sig_bits, SPX_FORS_BYTES};
+use crate::hash_message_trace::{synthesize_hash_message_parsed_with_trace, HashMessageTraceInputs};
 use crate::hash_msg::{
     synthesize_hash_message_parsed, synthesize_hash_message_parsed_public, HashMessageOutput,
     SPX_DGST_BYTES, SPX_PK_BYTES,
@@ -34,7 +35,7 @@ use crate::thash::{enforce_bits_equal_bytes, ADDR_BYTES, SPX_N};
 use crate::verify_public_io::InputizedVerifyPublic;
 use crate::wots::SPX_WOTS_BYTES;
 use bellpepper::gadgets::boolean::Boolean;
-use bellpepper_core::{ConstraintSystem, SynthesisError};
+use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use circuit_spec::{MESSAGE_MAX_BYTES, SPHINCS_PK_BYTES, SPHINCS_SIG_BYTES};
 
 /// Hypertree layers (`SPX_D`).
@@ -219,6 +220,80 @@ where
         message,
         mlen,
         hm_mgf,
+    )?;
+
+    synthesize_verify_core_tail(cs.namespace(|| "verify_tail"), pk, signature, &hm)
+}
+
+/// Full verify core with trace-linked `hash_message` seed-SHA (FORS / hypertree unchanged).
+#[allow(clippy::too_many_arguments)]
+pub fn synthesize_verify_core_with_trace<Scalar, CS>(
+    mut cs: CS,
+    pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
+    signature: &[u8; SPHINCS_SIG_BYTES],
+    hm_mgf: &[u8; SPX_DGST_BYTES],
+    trace: &HashMessageTraceInputs,
+    shared: &[AllocatedNum<Scalar>],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert!(mlen <= message.len());
+    enforce_message_padding(&mut cs, message, mlen)?;
+
+    let r = {
+        let mut a = [0u8; SPX_N];
+        a.copy_from_slice(&signature[..SIG_R_BYTES]);
+        a
+    };
+
+    let hm = synthesize_hash_message_parsed_with_trace(
+        cs.namespace(|| "hash_message"),
+        &r,
+        pk,
+        trace,
+        hm_mgf,
+        shared,
+    )?;
+
+    synthesize_verify_core_tail(cs.namespace(|| "verify_tail"), pk, signature, &hm)
+}
+
+/// Full verify core with public IO statement + trace-linked `hash_message`.
+#[allow(clippy::too_many_arguments)]
+pub fn synthesize_verify_core_public_with_trace<Scalar, CS>(
+    mut cs: CS,
+    _public: &InputizedVerifyPublic<Scalar>,
+    pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8; MESSAGE_MAX_BYTES],
+    mlen: usize,
+    signature: &[u8; SPHINCS_SIG_BYTES],
+    hm_mgf: &[u8; SPX_DGST_BYTES],
+    trace: &HashMessageTraceInputs,
+    shared: &[AllocatedNum<Scalar>],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    enforce_message_padding(&mut cs, message, mlen)?;
+
+    let r = {
+        let mut a = [0u8; SPX_N];
+        a.copy_from_slice(&signature[..SIG_R_BYTES]);
+        a
+    };
+
+    let hm = synthesize_hash_message_parsed_with_trace(
+        cs.namespace(|| "hash_message"),
+        &r,
+        pk,
+        trace,
+        hm_mgf,
+        shared,
     )?;
 
     synthesize_verify_core_tail(cs.namespace(|| "verify_tail"), pk, signature, &hm)
@@ -424,6 +499,62 @@ mod tests {
             msg.len(),
             &sig,
             &hm_mgf,
+        )
+        .expect("synth");
+        assert!(cs.is_satisfied());
+    }
+
+    /// Full verify core with trace-linked `hash_message` (slow).
+    ///
+    /// ```bash
+    /// cargo test -p sphincs-circuit valid_signature_satisfies_core_trace --release -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "full verify core trace hash_message is slow; run with --release --ignored"]
+    fn valid_signature_satisfies_core_trace() {
+        use crate::hash_message_trace::{
+            locate_hash_message_trace_span_for_mlen, HashMessageTraceInputs,
+        };
+        use sphincs_ref::verify_with_trace;
+
+        let seed = [0xadu8; CRYPTO_SEEDBYTES];
+        let msg = b"verify core trace hash_message";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+        let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+        let rows: Vec<circuit_spec::Sha256Compression> = trace
+            .compressions
+            .iter()
+            .map(|r| circuit_spec::Sha256Compression {
+                index: r.index,
+                h_in: r.h_in,
+                block: r.block,
+                h_out: r.h_out,
+            })
+            .collect();
+
+        let r = {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&sig[..16]);
+            a
+        };
+        let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, msg.len());
+        let span =
+            locate_hash_message_trace_span_for_mlen(&rows, &r, &pk, msg.len()).expect("span");
+        let trace_inputs = HashMessageTraceInputs::from_span(&rows, &span);
+
+        let mut padded = vec![0u8; MESSAGE_MAX_BYTES];
+        padded[..msg.len()].copy_from_slice(msg);
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        synthesize_verify_core_with_trace(
+            &mut cs,
+            &pk,
+            &padded,
+            msg.len(),
+            &sig,
+            &hm_mgf,
+            &trace_inputs,
+            &[],
         )
         .expect("synth");
         assert!(cs.is_satisfied());

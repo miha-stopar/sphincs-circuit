@@ -52,6 +52,7 @@ use sphincs_circuit::{
     enforce_public_inactive_chunks_zero_variable, enforce_public_mlen_in_range,
     synthesize_hash_message_parsed_public,
     synthesize_hash_message, synthesize_verify_core, synthesize_verify_core_public,
+    synthesize_verify_core_public_with_trace, synthesize_verify_core_with_trace,
     synthesize_hash_message_with_trace,
     hash_msg::SPX_DGST_BYTES, thash::SPX_N, step::StepInput,
     HashMessageTraceInputs,
@@ -412,26 +413,71 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                         &self.message,
                         self.mlen,
                     )?;
-                    synthesize_verify_core_public(
+
+                    if let Some(ref trace) = self.hash_message_trace {
+                        synthesize_verify_core_public_with_trace(
+                            cs.namespace(|| "verify_core"),
+                            &input,
+                            &self.pk,
+                            &self.message,
+                            self.mlen,
+                            signature,
+                            &self.hm_mgf,
+                            trace,
+                            shared,
+                        )?;
+                    } else {
+                        synthesize_verify_core_public(
+                            cs.namespace(|| "verify_core"),
+                            &input,
+                            &self.pk,
+                            &self.message,
+                            self.mlen,
+                            signature,
+                            &self.hm_mgf,
+                        )?;
+                    }
+
+                    if self.variable_public_mlen {
+                        enforce_public_matches_pk_message(
+                            cs.namespace(|| "public_stmt"),
+                            &input,
+                            &self.pk,
+                            &self.message,
+                        )?;
+                        enforce_public_inactive_chunks_zero_variable(
+                            cs.namespace(|| "public_tail"),
+                            &input,
+                        )?;
+                    } else {
+                        enforce_public_matches_statement(
+                            cs.namespace(|| "public_stmt"),
+                            &input,
+                            &self.pk,
+                            &self.message,
+                            self.mlen,
+                        )?;
+                        enforce_public_inactive_chunks_zero(
+                            cs.namespace(|| "public_tail"),
+                            &input,
+                            self.mlen,
+                        )?;
+                    }
+                } else if let Some(ref trace) = self.hash_message_trace {
+                    enforce_message_padding(
+                        cs.namespace(|| "msg_pad"),
+                        &self.message,
+                        self.mlen,
+                    )?;
+                    synthesize_verify_core_with_trace(
                         cs.namespace(|| "verify_core"),
-                        &input,
                         &self.pk,
                         &self.message,
                         self.mlen,
                         signature,
                         &self.hm_mgf,
-                    )?;
-                    enforce_public_matches_statement(
-                        cs.namespace(|| "public_stmt"),
-                        &input,
-                        &self.pk,
-                        &self.message,
-                        self.mlen,
-                    )?;
-                    enforce_public_inactive_chunks_zero(
-                        cs.namespace(|| "public_tail"),
-                        &input,
-                        self.mlen,
+                        trace,
+                        shared,
                     )?;
                 } else {
                     synthesize_verify_core(
@@ -444,11 +490,13 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                     )?;
                 }
 
-                enforce_core_shared_links(
-                    &mut cs.namespace(|| "links"),
-                    shared,
-                    &self.link_digests,
-                )?;
+                if !self.link_digests.is_empty() {
+                    enforce_core_shared_links(
+                        &mut cs.namespace(|| "links"),
+                        shared,
+                        &self.link_digests,
+                    )?;
+                }
             }
         }
 

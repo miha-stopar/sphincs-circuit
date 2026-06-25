@@ -1,6 +1,6 @@
 //! PQClean trace → `FoldStepCircuit` batching (M3).
 
-use circuit_spec::{Sha256Compression, SPHINCS_PK_BYTES};
+use circuit_spec::{Sha256Compression, SPHINCS_PK_BYTES, SPHINCS_SIG_BYTES};
 use sphincs_circuit::{
     locate_hash_message_trace_span_for_mlen, HashMessageTraceInputs, HashMessageTraceSpan,
     thash::SPX_N, witness::{local_chain_segments, step_input_from_row, LocalChain},
@@ -9,6 +9,19 @@ use sphincs_circuit::{
 use crate::bound::{bound_steps_from_inputs, FoldCoreBoundCircuit, FoldStepBoundCircuit};
 use crate::fold::FoldStepCircuit;
 use crate::packed::FoldPackedChainCircuit;
+
+/// PQClean KAT → `hash_message` trace rows for [`FoldVerifyCoreCircuit::with_hash_message_trace`].
+pub fn hash_message_trace_inputs_from_kat(
+    rows: &[Sha256Compression],
+    pk: &[u8; SPHINCS_PK_BYTES],
+    sig: &[u8; SPHINCS_SIG_BYTES],
+    msg: &[u8],
+) -> Option<HashMessageTraceInputs> {
+    let (_, mlen) = crate::verify_core::padded_message(msg);
+    let r = crate::verify_core::sig_r(sig);
+    let span = locate_hash_message_trace_span_for_mlen(rows, &r, pk, mlen)?;
+    Some(hash_message_trace_inputs(rows, &span))
+}
 
 /// PQClean compression rows for a located `hash_message` span.
 pub fn hash_message_trace_inputs(

@@ -183,6 +183,7 @@ cargo test -p sphincs-circuit valid_signature_satisfies_core_public --release --
 |------|----------------|
 | `valid_signature_satisfies_core` | Full `synthesize_verify_core` on PQClean KAT signature |
 | `valid_signature_satisfies_core_public` | Full `synthesize_verify_core_public` — FORS + hypertree + root with public `PK`/`M` in SHA preimage |
+| `valid_signature_satisfies_core_trace` | Full core with trace-linked `hash_message` (`synthesize_verify_core_with_trace`) |
 
 ### WOTS root-bits path (optional)
 
@@ -236,6 +237,10 @@ cargo test -p sphincs-prover --features pqclean --release \
 | `fold_verify_core_full_plain_steps` | prove + verify | Full core + plain steps (no shared) |
 | `fold_verify_core_full_public_io_setup` | `setup` | Full core + `public_io` shape |
 | `fold_verify_core_full_public_io_smoke` | prove + verify | Full core + `public_io` end-to-end |
+| `fold_verify_core_full_trace_linked_setup` | `setup` | Full core + trace-linked `hash_message` |
+| `fold_verify_core_full_public_io_trace_linked_setup` | `setup` | Full core + `public_io` + trace |
+| `fold_verify_core_full_public_io_trace_smoke` | prove + verify | Full core + `public_io` + trace end-to-end |
+| `fold_verify_core_full_variable_public_mlen_trace_setup` | `setup` | Full core + variable public `mlen` + trace |
 
 **Env:** `FOLD_VERIFY_CORE_STEPS` (default `4`, must be power of two ≥ 2).
 
@@ -243,9 +248,9 @@ cargo test -p sphincs-prover --features pqclean --release \
 
 ## What is *not* covered yet
 
-- **Variable public `mlen`** in one universal circuit (muxed SHA preimage).
+- **Variable public `mlen`** in one universal circuit (muxed SHA preimage; partial via trace on full core).
 - **Full trace scale** (~2k compressions) — tests use 4-step prefixes.
-- **Trace ↔ core SHA linking** inside `C_core` beyond shared link digests at chain boundaries.
+- **`thash` / FORS / hypertree trace linking** — still in-gadget SHA in full core.
 - Routine CI does **not** run Tier C/D — mark `#[ignore]` and run manually before big merges.
 
 ---

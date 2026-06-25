@@ -187,7 +187,7 @@ cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_mes
 1. **Variable public `mlen` (partial)** — [`with_variable_public_mlen`](../crates/sphincs-prover/src/verify_core.rs) + trace-linked seed; full universal circuit (all `mlen` topologies, one setup) in [VARIABLE_MLEN.md](VARIABLE_MLEN.md).
 2. **In-circuit tree/leaf bit mux** — addresses still use synthesis-time constants from parsed mgf witness (optional hardening; see [CIRCUIT.md](CIRCUIT.md)).
 3. **Full trace scale** — tests use 4-step chain prefix, not ~2k compressions.
-4. **`hash_message` trace linking (done)** — [`synthesize_hash_message_with_trace`](../crates/sphincs-circuit/src/hash_message_trace.rs) wires **seed-SHA** compressions to NeutronNova `shared` links; **MGF1** is proved by folded `C_step` rows while the core derives MGF1 one-shot from the linked seed. **`thash` / FORS / hypertree** still use in-gadget SHA.
+4. **`hash_message` trace linking (done)** — seed-SHA wired to NeutronNova `shared` links in Phase 2a and **Full** core (`synthesize_verify_core_with_trace`). MGF1 via folded `C_step`. **`thash` / FORS / hypertree** still use in-gadget SHA.
 5. **Variable public `mlen`** — muxed preimage / incremental SHA in `hash_message_bits`.
 
 ---

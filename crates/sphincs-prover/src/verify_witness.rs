@@ -181,4 +181,31 @@ mod tests {
         assert!(core.public_io);
         assert_eq!(core.phase, crate::verify_core::VerifyCorePhase::Full);
     }
+
+    #[test]
+    fn fold_verify_core_from_pqclean_with_hash_message_trace() {
+        use circuit_spec::Sha256Compression;
+        use sphincs_ref::verify_with_trace;
+
+        let seed = [3u8; CRYPTO_SEEDBYTES];
+        let msg = b"span";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+        let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+        let rows: Vec<Sha256Compression> = trace
+            .compressions
+            .iter()
+            .map(|r| Sha256Compression {
+                index: r.index,
+                h_in: r.h_in,
+                block: r.block,
+                h_out: r.h_out,
+            })
+            .collect();
+        let trace_inputs =
+            crate::trace::hash_message_trace_inputs_from_kat(&rows, &pk, &sig, msg).expect("span");
+        let core = fold_verify_core_from_pqclean(pk, sig, msg, vec![])
+            .with_hash_message_trace(trace_inputs);
+        assert!(core.hash_message_trace.is_some());
+        assert_eq!(core.phase, crate::verify_core::VerifyCorePhase::Full);
+    }
 }

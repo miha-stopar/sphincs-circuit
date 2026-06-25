@@ -9,8 +9,9 @@ use circuit_spec::{Sha256Compression, SPHINCS_PK_BYTES};
 use ff::PrimeField;
 
 use crate::hash_msg::{
-    hash_message_seed_path, hash_message_tail_message_bytes, mgf1_digest_bits, HashMessageSeedPath,
-    HASH_MESSAGE_INBUF_BYTES, HASH_MESSAGE_PREFIX_BYTES, SPX_DGST_BYTES, SPX_PK_BYTES,
+    hash_message_seed_path, hash_message_tail_message_bytes, mgf1_digest_bits, parse_mgf_output,
+    HashMessageOutput, HashMessageSeedPath, HASH_MESSAGE_INBUF_BYTES, HASH_MESSAGE_PREFIX_BYTES,
+    SPX_DGST_BYTES, SPX_PK_BYTES,
 };
 use crate::thash::enforce_bits_equal_bytes;
 use crate::sha256_compress::{
@@ -255,6 +256,23 @@ where
     let mgf_bits = mgf1_digest_bits(cs.namespace(|| "mgf1"), &seed_bits, SPX_DGST_BYTES)?;
     enforce_bits_equal_bytes(cs.namespace(|| "mgf_out"), &mgf_bits, expected_mgf)?;
     Ok(())
+}
+
+/// Like [`synthesize_hash_message_with_trace`] but returns parsed [`HashMessageOutput`] for verify core.
+pub fn synthesize_hash_message_parsed_with_trace<Scalar, CS>(
+    cs: CS,
+    r: &[u8; SPX_N],
+    pk: &[u8; SPHINCS_PK_BYTES],
+    trace: &HashMessageTraceInputs,
+    expected_mgf: &[u8; SPX_DGST_BYTES],
+    shared: &[AllocatedNum<Scalar>],
+) -> Result<HashMessageOutput, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    synthesize_hash_message_with_trace(cs, r, pk, trace, expected_mgf, shared)?;
+    Ok(parse_mgf_output(expected_mgf))
 }
 
 /// `hash_message` with seed-SHA from folded trace rows wired to NeutronNova `shared` links.

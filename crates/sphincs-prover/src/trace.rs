@@ -2,14 +2,38 @@
 
 use circuit_spec::{Sha256Compression, SPHINCS_PK_BYTES};
 use sphincs_circuit::{
-    locate_hash_message_trace_span_for_mlen,
+    locate_hash_message_trace_span_for_mlen, HashMessageTraceInputs, HashMessageTraceSpan,
     thash::SPX_N, witness::{local_chain_segments, step_input_from_row, LocalChain},
-    HashMessageTraceSpan,
 };
 
 use crate::bound::{bound_steps_from_inputs, FoldCoreBoundCircuit, FoldStepBoundCircuit};
 use crate::fold::FoldStepCircuit;
 use crate::packed::FoldPackedChainCircuit;
+
+/// PQClean compression rows for a located `hash_message` span.
+pub fn hash_message_trace_inputs(
+    rows: &[Sha256Compression],
+    span: &HashMessageTraceSpan,
+) -> HashMessageTraceInputs {
+    HashMessageTraceInputs::from_span(rows, span)
+}
+
+/// Plain fold steps over the full `hash_message` span when `total_compressions` is a power of two ≥ 2.
+pub fn hash_message_full_span_plain(
+    rows: &[Sha256Compression],
+    r: &[u8; SPX_N],
+    pk: &[u8; SPHINCS_PK_BYTES],
+    mlen: usize,
+) -> Option<(HashMessageTraceSpan, Vec<FoldStepCircuit>, HashMessageTraceInputs)> {
+    let span = locate_hash_message_trace_span_for_mlen(rows, r, pk, mlen)?;
+    let n = span.total_compressions();
+    if n < 2 || !n.is_power_of_two() {
+        return None;
+    }
+    let trace = HashMessageTraceInputs::from_span(rows, &span);
+    let steps = fold_steps_from_rows(&rows[span.seed.start..=span.mgf1.end]);
+    Some((span, steps, trace))
+}
 
 /// Plain step circuits over the full `hash_message` span (seed + MGF1; not one local chain).
 pub fn hash_message_chain_prefix(

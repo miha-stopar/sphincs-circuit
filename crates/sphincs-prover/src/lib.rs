@@ -55,8 +55,10 @@ pub use fold::{
 pub use packed::FoldPackedChainCircuit;
 pub use trace::{
     chain_boundary_links, fold_steps_from_rows, fold_steps_prefix, hash_message_chain_prefix,
-    hash_message_seed_chain_bound, link_digests_from_boundary, longest_chain_bound,
-    longest_chain_packed, longest_chain_prefix, longest_local_chain, packed_chains_from_trace,
-    pad_steps_to_power_of_two,
+    hash_message_full_span_plain, hash_message_seed_chain_bound, hash_message_trace_inputs,
+    link_digests_from_boundary, longest_chain_bound, longest_chain_packed, longest_chain_prefix,
+    longest_local_chain, packed_chains_from_trace, pad_steps_to_power_of_two,
 };
-pub use sphincs_circuit::{hash_message_compression_count_exact, HashMessageTraceSpan};
+pub use sphincs_circuit::{
+    hash_message_compression_count_exact, HashMessageTraceInputs, HashMessageTraceSpan,
+};

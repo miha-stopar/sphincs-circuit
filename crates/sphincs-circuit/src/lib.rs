@@ -42,7 +42,8 @@ pub use hash_message_trace::{
     hash_message_compression_count_exact, hash_message_mgf1_compression_count,
     hash_message_seed_compression_count, locate_hash_message_trace_span,
     locate_hash_message_trace_span_for_mlen, sha256_compression_count_fresh,
-    synthesize_hash_message_with_seed_trace, HashMessageTraceSpan,
+    synthesize_hash_message_with_seed_trace, synthesize_hash_message_with_trace,
+    HashMessageTraceInputs, HashMessageTraceSpan,
 };
 pub use hypertree::{
     hypertree_layer_bits, hypertree_layer_from_root_bits, synthesize_hypertree_layer,
@@ -55,7 +56,7 @@ pub use shared_link::{
 };
 pub use sha256_compress::{
     synthesize_compression, synthesize_compression_chain_for_fold_with_links,
-    synthesize_compression_chain_for_fold_with_shared, synthesize_compression_for_fold_h_words,
+    synthesize_compression_chain_for_fold_with_shared, synthesize_compression_trace_row_for_fold, synthesize_compression_for_fold_h_words,
     synthesize_compression_for_fold_with_out, synthesize_compression_with_stats, StepStats,
 };
 pub use chain::enforce_digest_bytes_eq_words;

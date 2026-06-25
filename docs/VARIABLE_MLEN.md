@@ -1,6 +1,6 @@
 # Variable public `mlen` — design notes (Phase 2c+)
 
-**Status:** steps C–D landed; step **E (partial)** — exact compression counts + PQClean trace span location. Preimage **length** still fixed per `circuit_mlen` instance; core↔fold equating not yet wired.
+**Status:** steps E–E+++ done for `hash_message` trace alignment (counts, span location, seed/MGF1 core↔fold linking). Variable public `mlen` in one universal circuit remains future work.
 
 **Related:** [VERIFY_CORE.md](VERIFY_CORE.md) · [FOLDING.md](FOLDING.md) §4.2 · [HACKMD_NEUTRONNOVA_PLAN.md](HACKMD_NEUTRONNOVA_PLAN.md) §Phase 2 `mlen` table
 
@@ -99,10 +99,10 @@ Already enforced: [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circ
 | **B** (done) | In-circuit `mlen` range check on public scalar | `enforce_public_mlen_in_range` |
 | **C** (done) | Mux short/long native SHA paths in R1CS (no trace yet) | `hash_message_variable_mlen_matches_native` |
 | **D** (done) | Public `mlen` masks inactive message bytes in SHA preimage + full core test | `valid_signature_satisfies_core_variable_mlen`, `public_message_bits_for_mlen` |
-| **E** (partial) | Exact compression counts + trace span location | `hash_message_compression_count_exact`, `hash_message_compression_count_exact_matches_pqclean_trace` |
-| **E+** (partial) | Prover selects `hash_message` trace rows for fold | `hash_message_seed_chain_bound`, `fold_verify_core_hash_message_seed_chain_bound_smoke` |
-| **E++** (partial) | Core seed-SHA wired to shared fold links | `synthesize_hash_message_with_seed_trace`, `FoldVerifyCoreCircuit::with_seed_trace` |
-| **E+++** | MGF1 + full verify trace linking | `fold_verify_core_*` full span |
+| **E** (done) | Exact compression counts + trace span location | `hash_message_compression_count_exact`, `hash_message_compression_count_exact_matches_pqclean_trace` |
+| **E+** (done) | Prover selects `hash_message` trace rows for fold | `hash_message_seed_chain_bound`, `hash_message_full_span_plain` |
+| **E++** (done) | Core seed-SHA wired to shared fold links | `synthesize_hash_message_with_trace`, `with_seed_trace` |
+| **E+++** (done) | Full-span fold + trace-linked core (seed trace, MGF1 via fold `C_step`) | `fold_verify_core_hash_message_full_trace_linked_smoke` |
 
 Do **not** block Phase 2b/full-core KATs on step E — fixed-`mlen` instances remain valid deployment mode.
 

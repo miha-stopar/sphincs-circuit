@@ -51,8 +51,9 @@ use sphincs_circuit::{
     enforce_public_inactive_chunks_zero, enforce_public_mlen_in_range,
     synthesize_hash_message_parsed_public,
     synthesize_hash_message, synthesize_verify_core, synthesize_verify_core_public,
-    synthesize_hash_message_with_seed_trace,
+    synthesize_hash_message_with_trace,
     hash_msg::SPX_DGST_BYTES, thash::SPX_N, step::StepInput,
+    HashMessageTraceInputs,
 };
 
 use crate::fold::E;
@@ -124,8 +125,8 @@ pub struct FoldVerifyCoreCircuit {
     pub signature: Option<[u8; SPHINCS_SIG_BYTES]>,
     /// `link_digests[k]` = expected bytes at boundary between step `k` and `k+1` on the trace.
     pub link_digests: Vec<[u8; 32]>,
-    /// When set, seed-SHA in `hash_message` is synthesized from these trace rows wired to `shared`.
-    pub seed_trace_rows: Option<Vec<StepInput>>,
+    /// When set, `hash_message` uses PQClean compression rows wired to folded steps.
+    pub hash_message_trace: Option<HashMessageTraceInputs>,
     /// When true, expose `(mlen, PK, M_padded)` via Spartan `public_values` + `inputize`.
     /// See `sphincs_circuit::verify_public_io` and `docs/VERIFY_CORE.md` §Public Spartan IO.
     pub public_io: bool,
@@ -152,7 +153,7 @@ impl FoldVerifyCoreCircuit {
             hm_mgf,
             signature: None,
             link_digests,
-            seed_trace_rows: None,
+            hash_message_trace: None,
             public_io: false,
             _p: PhantomData,
         }
@@ -173,9 +174,18 @@ impl FoldVerifyCoreCircuit {
         self
     }
 
-    /// Wire seed-SHA from PQClean compression rows into NeutronNova shared link variables.
+    /// Wire seed-SHA only (MGF1 one-shot). Prefer [`Self::with_hash_message_trace`].
     pub fn with_seed_trace(mut self, rows: Vec<StepInput>) -> Self {
-        self.seed_trace_rows = Some(rows);
+        self.hash_message_trace = Some(HashMessageTraceInputs {
+            seed_rows: rows,
+            mgf1_rows: Vec::new(),
+        });
+        self
+    }
+
+    /// Wire full `hash_message` span (seed + MGF1) from PQClean compression rows.
+    pub fn with_hash_message_trace(mut self, trace: HashMessageTraceInputs) -> Self {
+        self.hash_message_trace = Some(trace);
         self
     }
 
@@ -210,7 +220,7 @@ impl FoldVerifyCoreCircuit {
             hm_mgf,
             signature: Some(signature),
             link_digests,
-            seed_trace_rows: None,
+            hash_message_trace: None,
             public_io: false,
             _p: PhantomData,
         }
@@ -296,17 +306,17 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                         &input,
                         self.mlen,
                     )?;
-                } else if let Some(ref seed_rows) = self.seed_trace_rows {
+                } else if let Some(ref trace) = self.hash_message_trace {
                     enforce_message_padding(
                         cs.namespace(|| "msg_pad"),
                         &self.message,
                         self.mlen,
                     )?;
-                    synthesize_hash_message_with_seed_trace(
+                    synthesize_hash_message_with_trace(
                         cs.namespace(|| "hash_message_trace"),
                         &self.r,
                         &self.pk,
-                        seed_rows,
+                        trace,
                         &self.hm_mgf,
                         shared,
                     )?;

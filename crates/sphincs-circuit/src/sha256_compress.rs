@@ -200,6 +200,29 @@ where
     )
 }
 
+/// One PQClean trace row in core glue: allocated block + enforced `h_out` witness.
+pub fn synthesize_compression_trace_row_for_fold<Scalar, CS>(
+    mut cs: CS,
+    row: &crate::step::StepInput,
+) -> Result<Vec<UInt32>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    use crate::chain::enforce_sha256_words_equal;
+
+    let h_words = words_from_state_bytes(cs.namespace(|| "h_in"), "h_in", &row.h_in)?;
+    let block_bits = block_to_allocated_bits(cs.namespace(|| "block"), &row.block)?;
+    let out_words = sha256_compression_function(
+        cs.namespace(|| "compress"),
+        &block_bits,
+        &h_words,
+    )?;
+    let expected = words_from_state_bytes(cs.namespace(|| "h_out"), "h_out", &row.h_out)?;
+    enforce_sha256_words_equal(cs.namespace(|| "h_out_eq"), &out_words, &expected)?;
+    Ok(out_words)
+}
+
 /// Like [`synthesize_compression_for_fold`], but wire `h_out[i] == h_in[i+1]` between rows.
 ///
 /// Row `i+1` uses the compression output wires of row `i` as `h_in` (sound in-circuit chain).

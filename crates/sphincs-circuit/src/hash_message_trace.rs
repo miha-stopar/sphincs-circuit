@@ -15,6 +15,7 @@ use crate::hash_msg::{
 use crate::thash::enforce_bits_equal_bytes;
 use crate::sha256_compress::{
     sha256_state_words_to_bits_be, synthesize_compression_chain_for_fold_with_shared,
+    synthesize_compression_trace_row_for_fold,
 };
 use crate::step::StepInput;
 use crate::thash::SPX_N;
@@ -62,6 +63,32 @@ pub fn hash_message_compression_count_exact(mlen: usize) -> usize {
 pub struct HashMessageTraceSpan {
     pub seed: LocalChain,
     pub mgf1: LocalChain,
+}
+
+/// PQClean compression rows for a located [`HashMessageTraceSpan`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashMessageTraceInputs {
+    pub seed_rows: Vec<StepInput>,
+    pub mgf1_rows: Vec<StepInput>,
+}
+
+impl HashMessageTraceInputs {
+    pub fn from_span(rows: &[Sha256Compression], span: &HashMessageTraceSpan) -> Self {
+        Self {
+            seed_rows: rows[span.seed.start..=span.seed.end]
+                .iter()
+                .map(crate::witness::step_input_from_row)
+                .collect(),
+            mgf1_rows: rows[span.mgf1.start..=span.mgf1.end]
+                .iter()
+                .map(crate::witness::step_input_from_row)
+                .collect(),
+        }
+    }
+
+    pub fn total_compressions(&self) -> usize {
+        self.seed_rows.len() + self.mgf1_rows.len()
+    }
 }
 
 impl HashMessageTraceSpan {
@@ -179,10 +206,60 @@ fn constant_bits(bytes: &[u8]) -> Vec<Boolean> {
         .collect()
 }
 
+
+fn seed_hash_bits_from_trace<Scalar, CS>(
+    mut cs: CS,
+    seed_rows: &[StepInput],
+    shared: &[AllocatedNum<Scalar>],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let words = match seed_rows.len() {
+        0 => return Err(SynthesisError::AssignmentMissing),
+        1 => synthesize_compression_trace_row_for_fold(cs.namespace(|| "seed_row0"), &seed_rows[0])?,
+        _ => synthesize_compression_chain_for_fold_with_shared(
+            cs.namespace(|| "seed_chain"),
+            seed_rows,
+            shared,
+        )?,
+    };
+    Ok(sha256_state_words_to_bits_be(&words))
+}
+
+/// Full `hash_message` from PQClean trace rows (seed compressions + optional MGF1 row metadata).
+///
+/// - `seed_rows.len() == 1`: single compression, no shared links.
+/// - `seed_rows.len() >= 2`: internal boundaries wired to `shared`.
+/// - `mgf1_rows`: used by the prover to select folded `C_step` instances; core derives MGF1
+///   one-shot from the trace-linked seed hash (fold proves the MGF1 compression separately).
+pub fn synthesize_hash_message_with_trace<Scalar, CS>(
+    mut cs: CS,
+    r: &[u8; SPX_N],
+    pk: &[u8; SPHINCS_PK_BYTES],
+    trace: &HashMessageTraceInputs,
+    expected_mgf: &[u8; SPX_DGST_BYTES],
+    shared: &[AllocatedNum<Scalar>],
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let seed_hash_bits =
+        seed_hash_bits_from_trace(cs.namespace(|| "seed"), &trace.seed_rows, shared)?;
+
+    let mut seed_bits = constant_bits(r);
+    seed_bits.extend(constant_bits(&pk[..SPX_N]));
+    seed_bits.extend(seed_hash_bits);
+    let mgf_bits = mgf1_digest_bits(cs.namespace(|| "mgf1"), &seed_bits, SPX_DGST_BYTES)?;
+    enforce_bits_equal_bytes(cs.namespace(|| "mgf_out"), &mgf_bits, expected_mgf)?;
+    Ok(())
+}
+
 /// `hash_message` with seed-SHA from folded trace rows wired to NeutronNova `shared` links.
 ///
-/// MGF1 still uses the one-shot bellpepper SHA gadget. `seed_rows.len()` must be ≥ 2 and
-/// `shared.len() == (seed_rows.len() - 1) * DIGEST_WORDS`.
+/// MGF1 uses the one-shot bellpepper SHA gadget. Prefer [`synthesize_hash_message_with_trace`].
 pub fn synthesize_hash_message_with_seed_trace<Scalar, CS>(
     mut cs: CS,
     r: &[u8; SPX_N],
@@ -195,19 +272,11 @@ where
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    let final_words = synthesize_compression_chain_for_fold_with_shared(
-        cs.namespace(|| "seed_chain"),
-        seed_rows,
-        shared,
-    )?;
-
-    let mut seed_bits = constant_bits(r);
-    seed_bits.extend(constant_bits(&pk[..SPX_N]));
-    seed_bits.extend(sha256_state_words_to_bits_be(&final_words));
-
-    let mgf_bits = mgf1_digest_bits(cs.namespace(|| "mgf1"), &seed_bits, SPX_DGST_BYTES)?;
-    enforce_bits_equal_bytes(cs.namespace(|| "mgf_out"), &mgf_bits, expected_mgf)?;
-    Ok(())
+    let trace = HashMessageTraceInputs {
+        seed_rows: seed_rows.to_vec(),
+        mgf1_rows: Vec::new(),
+    };
+    synthesize_hash_message_with_trace(cs, r, pk, &trace, expected_mgf, shared)
 }
 
 #[cfg(test)]
@@ -279,6 +348,32 @@ mod tests {
         assert!(
             hash_message_compression_count_exact(128) <= hash_message_compression_count_exact(512)
         );
+    }
+
+    #[test]
+    fn hash_message_full_trace_linked_satisfies_short_and_long_seed() {
+        use bellpepper_core::test_cs::TestConstraintSystem;
+        use blstrs::Scalar as Fr;
+        use crate::hash_msg::hash_message_mgf_buf;
+        use crate::shared_link::alloc_digest_shared;
+
+        for (msg, mlen) in [(b"short".as_slice(), 5usize), (vec![0u8; 15].as_slice(), 15usize)] {
+            let (pk, r, rows) = trace_rows(msg);
+            let span = locate_hash_message_trace_span_for_mlen(&rows, &r, &pk, mlen).expect("span");
+            let trace = HashMessageTraceInputs::from_span(&rows, &span);
+            let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+
+            let mut cs = TestConstraintSystem::<Fr>::new();
+            let shared = if trace.seed_rows.len() >= 2 {
+                let link = rows[span.seed.start].h_out;
+                alloc_digest_shared(&mut cs, "link0", link).expect("shared")
+            } else {
+                Vec::new()
+            };
+            synthesize_hash_message_with_trace(&mut cs, &r, &pk, &trace, &hm_mgf, &shared)
+                .expect("synth");
+            assert!(cs.is_satisfied(), "mlen={mlen}");
+        }
     }
 
     #[test]

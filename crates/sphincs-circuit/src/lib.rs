@@ -29,12 +29,13 @@ pub use fors::{
 };
 /// `hash_message` gadgets and Phase 2c parse helpers (`parse_mgf_output`, `synthesize_hash_message_parsed`).
 pub use hash_msg::{
+    enforce_public_mlen_seed_path, hash_message_bits_from_public_muxed,
     hash_message_compression_budget, hash_message_first_block_message_bytes,
     hash_message_mgf_buf, hash_message_native, hash_message_output_from_mgf_bits,
-    hash_message_seed_path, hash_message_tail_message_bytes, parse_mgf_output,
-    synthesize_hash_message, synthesize_hash_message_parsed, synthesize_hash_message_parsed_public,
-    HashMessageOutput, HashMessageSeedPath, SPX_DGST_BYTES, HASH_MESSAGE_INBUF_BYTES,
-    HASH_MESSAGE_PREFIX_BYTES,
+    hash_message_seed_hash_native, hash_message_seed_hash_native_long, hash_message_seed_path,
+    hash_message_tail_message_bytes, parse_mgf_output, synthesize_hash_message,
+    synthesize_hash_message_parsed, synthesize_hash_message_parsed_public, HashMessageOutput,
+    HashMessageSeedPath, SPX_DGST_BYTES, HASH_MESSAGE_INBUF_BYTES, HASH_MESSAGE_PREFIX_BYTES,
 };
 pub use hypertree::{
     hypertree_layer_bits, hypertree_layer_from_root_bits, synthesize_hypertree_layer,
@@ -64,7 +65,8 @@ pub use verify::{
 pub use verify_public_io::{
     enforce_public_inactive_chunks_zero, enforce_public_matches_statement,
     enforce_public_mlen_in_range, inputize_verify_public, pack_verify_public,
-    public_message_sha_bits, public_pk_sha_bits, public_mlen_as_u32, InputizedVerifyPublic,
+    public_message_sha_bits, public_mlen_as_u32, public_mlen_is_short_path, public_pk_sha_bits,
+    InputizedVerifyPublic,
 };
 pub use witness::{
     local_chain_segments, step_input_from_row, trace_stats, witness_from_compressions,

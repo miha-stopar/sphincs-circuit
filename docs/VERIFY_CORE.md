@@ -12,7 +12,8 @@ This document describes **Phase 2** of porting the M2 verify gadgets (`sphincs-c
 - **Done (step 1c):** Full phase uses [`synthesize_verify_core_public`](../crates/sphincs-circuit/src/verify.rs) when `public_io` (same public preimage wiring through entire verify path).
 - **Done (step 2):** WOTS topology from chained `root_bits` via [`witness_bytes_from_bits`](../crates/sphincs-circuit/src/thash.rs) — no `intermediate_roots` field on `FoldVerifyCoreCircuit`.
 - **Done (variable `mlen` step B):** [`enforce_public_mlen_in_range`](../crates/sphincs-circuit/src/verify_public_io.rs) — public `mlen ≤ MESSAGE_MAX_BYTES` in R1CS.
-- **Remaining:** Variable public `mlen` mux (steps C–E in [VARIABLE_MLEN.md](VARIABLE_MLEN.md)); optional in-circuit tree/leaf bit mux; max-unroll WOTS `chain_lengths`.
+- **Done (variable `mlen` step C):** short/long `hash_message` seed SHA mux via [`hash_message_bits_from_public_muxed`](../crates/sphincs-circuit/src/hash_msg.rs) + [`public_mlen_is_short_path`](../crates/sphincs-circuit/src/verify_public_io.rs).
+- **Remaining:** Variable `mlen` steps D–E ([VARIABLE_MLEN.md](VARIABLE_MLEN.md)); optional in-circuit tree/leaf bit mux; max-unroll WOTS `chain_lengths`.
 
 ---
 
@@ -166,7 +167,7 @@ cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_mes
 |-----------|------|----------------|------------|
 | `hash_msg::tests::parsed_output_matches_native` | — | Phase 2c: `synthesize_hash_message_parsed` + `parse_mgf_output` agree with PQClean | ✅ runs |
 | `hash_msg::tests::hash_message_public_preimage_matches_native` | — | SHA preimage wired from public IO columns | ✅ runs |
-| `hash_msg::tests::hash_message_seed_path_boundaries` | — | PQClean `hash_message` short/long branch boundaries | ✅ runs |
+| `hash_msg::tests::hash_message_variable_mlen_matches_native` | — | Short/long seed SHA mux from public `mlen` (fixed `circuit_mlen`) | ✅ runs |
 | `verify::tests::wrong_hm_mgf_unsatisfies_parsed_hash_message` | — | Corrupt `hm_mgf` breaks `mgf_bits == hm_mgf` | ✅ runs |
 | `verify::tests::valid_signature_satisfies_core_public` | — | Full core + public-wired `hash_message` on PQClean KAT | `#[ignore]` release |
 | [`fold_verify_core_hash_message.rs`](../crates/sphincs-prover/tests/fold_verify_core_hash_message.rs) | `smoke`, `plain_steps` | Phase 2a end-to-end prove/verify | ✅ runs |

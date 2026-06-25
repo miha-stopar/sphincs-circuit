@@ -20,7 +20,9 @@
 
 use crate::fors::SPX_FORS_MSG_BYTES;
 use crate::thash::{alloc_input_bits, enforce_bits_equal_bytes, SPX_N};
-use crate::verify_public_io::{public_message_sha_bits, public_pk_sha_bits, InputizedVerifyPublic};
+use crate::verify_public_io::{
+    public_message_sha_bits, public_mlen_is_short_path, public_pk_sha_bits, InputizedVerifyPublic,
+};
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{ConstraintSystem, SynthesisError};
@@ -301,6 +303,190 @@ where
     Ok((mgf_bits, parse_mgf_output(&buf)))
 }
 
+/// Native seed hash `SHA256(R ‖ PK ‖ M[0..mlen])` — PQClean short path.
+pub fn hash_message_seed_hash_native(
+    r: &[u8; SPX_N],
+    pk: &[u8; SPX_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
+) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(r);
+    h.update(pk);
+    h.update(&message[..mlen]);
+    h.finalize().into()
+}
+
+/// Native seed hash via PQClean long path (`inc_blocks` + `inc_finalize` tail).
+pub fn hash_message_seed_hash_native_long(
+    r: &[u8; SPX_N],
+    pk: &[u8; SPX_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
+) -> [u8; 32] {
+    let first = hash_message_first_block_message_bytes(mlen);
+    let mut block = [0u8; HASH_MESSAGE_INBUF_BYTES];
+    block[..SPX_N].copy_from_slice(r);
+    block[SPX_N..SPX_N + SPX_PK_BYTES].copy_from_slice(pk);
+    block[SPX_N + SPX_PK_BYTES..SPX_N + SPX_PK_BYTES + first].copy_from_slice(&message[..first]);
+    let mut h = Sha256::new();
+    h.update(&block);
+    if mlen > first {
+        h.update(&message[first..mlen]);
+    }
+    h.finalize().into()
+}
+
+fn boolean_mux<Scalar, CS>(
+    mut cs: CS,
+    cond: &Boolean,
+    when_true: &Boolean,
+    when_false: &Boolean,
+) -> Result<Boolean, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let t = Boolean::and(cs.namespace(|| "mux_t"), cond, when_true)?;
+    let f = Boolean::and(cs.namespace(|| "mux_f"), &cond.not(), when_false)?;
+    Boolean::or(cs.namespace(|| "mux_or"), &t, &f)
+}
+
+fn mux_boolean_vectors<Scalar, CS>(
+    mut cs: CS,
+    cond: &Boolean,
+    a: &[Boolean],
+    b: &[Boolean],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(a.len(), b.len());
+    a.iter()
+        .zip(b.iter())
+        .enumerate()
+        .map(|(i, (x, y))| boolean_mux(cs.namespace(|| format!("mux_{i}")), cond, x, y))
+        .collect()
+}
+
+/// Tie public `mlen` path bit to synthesis-time `circuit_mlen` until fully variable circuits land.
+pub fn enforce_public_mlen_seed_path<Scalar, CS>(
+    mut cs: CS,
+    public: &InputizedVerifyPublic<Scalar>,
+    circuit_mlen: usize,
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let is_short = public_mlen_is_short_path(cs.namespace(|| "path"), public)?;
+    let expect_short = hash_message_seed_path(circuit_mlen) == HashMessageSeedPath::ShortFinalize;
+    Boolean::enforce_equal(
+        cs.namespace(|| "path_eq"),
+        &is_short,
+        &Boolean::constant(expect_short),
+    )?;
+    Ok(())
+}
+
+fn mgf1_bits_from_seed_hash<Scalar, CS>(
+    mut cs: CS,
+    r: &[u8; SPX_N],
+    pk: &[u8; SPX_PK_BYTES],
+    seed_hash_bits: &[Boolean],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let pk_seed_bits: Vec<Boolean> = bytes_to_bits_be(&pk[..SPX_N])
+        .into_iter()
+        .map(Boolean::constant)
+        .collect();
+    let mut seed_bits: Vec<Boolean> = bytes_to_bits_be(r).into_iter().map(Boolean::constant).collect();
+    seed_bits.extend(pk_seed_bits);
+    seed_bits.extend(seed_hash_bits.iter().cloned());
+    mgf1_digest_bits(cs.namespace(|| "mgf1"), &seed_bits, SPX_DGST_BYTES)
+}
+
+/// `hash_message` seed SHA with **short/long path mux** from public `mlen`.
+///
+/// `circuit_mlen` still fixes short/long preimage sizes at synthesis; public `mlen` selects the
+/// active PQClean branch via [`public_mlen_is_short_path`]. [`enforce_public_mlen_seed_path`]
+/// ties public path to `circuit_mlen` on fixed-`mlen` instances.
+///
+/// # Testing
+///
+/// ```bash
+/// cargo test -p sphincs-circuit hash_message_variable_mlen_matches_native
+/// ```
+pub fn hash_message_bits_from_public_muxed<Scalar, CS>(
+    mut cs: CS,
+    r: &[u8; SPX_N],
+    public: &InputizedVerifyPublic<Scalar>,
+    pk: &[u8; SPX_PK_BYTES],
+    message: &[u8; MESSAGE_MAX_BYTES],
+    circuit_mlen: usize,
+) -> Result<(Vec<Boolean>, HashMessageOutput), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert!(circuit_mlen <= MESSAGE_MAX_BYTES);
+    enforce_public_mlen_seed_path(cs.namespace(|| "mlen_path"), public, circuit_mlen)?;
+
+    let pk_bits = public_pk_sha_bits(cs.namespace(|| "pub_pk"), &public.pk_words, pk)?;
+    let msg_bits = public_message_sha_bits(
+        cs.namespace(|| "pub_msg"),
+        &public.message_words,
+        message,
+    )?;
+
+    let r_bits: Vec<Boolean> = bytes_to_bits_be(r).into_iter().map(Boolean::constant).collect();
+
+    // Short path: SHA256(R ‖ PK ‖ M[0..circuit_mlen]).
+    let mut short_preimage = r_bits.clone();
+    short_preimage.extend(pk_bits.iter().cloned());
+    short_preimage.extend(msg_bits.iter().take(circuit_mlen * 8).cloned());
+    let short_seed = sha256(cs.namespace(|| "hm_seed_short"), &short_preimage)?;
+
+    // Long path: SHA256( 64-byte block ‖ M[16..circuit_mlen] ).
+    let first_block = HASH_MESSAGE_INBUF_BYTES - HASH_MESSAGE_PREFIX_BYTES;
+    let mut block64 = r_bits;
+    block64.extend(pk_bits.iter().cloned());
+    block64.extend(msg_bits.iter().take(first_block * 8).cloned());
+    assert_eq!(block64.len(), HASH_MESSAGE_INBUF_BYTES * 8);
+    let tail_len = circuit_mlen.saturating_sub(first_block);
+    let mut long_preimage = block64;
+    long_preimage.extend(msg_bits.iter().skip(first_block * 8).take(tail_len * 8).cloned());
+    let long_seed = sha256(cs.namespace(|| "hm_seed_long"), &long_preimage)?;
+
+    let is_short = public_mlen_is_short_path(cs.namespace(|| "mlen_mux"), public)?;
+    let seed_hash_bits = mux_boolean_vectors(
+        cs.namespace(|| "seed_mux"),
+        &is_short,
+        &short_seed,
+        &long_seed,
+    )?;
+
+    let mgf_bits = mgf1_bits_from_seed_hash(cs.namespace(|| "mgf"), r, pk, &seed_hash_bits)?;
+
+    let mut buf = [0u8; SPX_DGST_BYTES];
+    for (i, chunk) in buf.iter_mut().enumerate() {
+        let start = i * 8;
+        let mut byte = 0u8;
+        for (j, bit) in mgf_bits[start..start + 8].iter().enumerate() {
+            if bit.get_value().unwrap_or(false) {
+                byte |= 1 << (7 - j);
+            }
+        }
+        *chunk = byte;
+    }
+
+    Ok((mgf_bits, parse_mgf_output(&buf)))
+}
+
 /// In-circuit `hash_message` with `R ‖ PK ‖ M[0..mlen]` wired from **public Spartan columns**.
 ///
 /// `pk` / `message` byte buffers supply synthesis-time assignments; R1CS ties
@@ -325,45 +511,7 @@ where
     Scalar: ff::PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    assert!(mlen <= MESSAGE_MAX_BYTES);
-
-    let pk_bits = public_pk_sha_bits(cs.namespace(|| "pub_pk"), &public.pk_words, pk)?;
-    let msg_bits = public_message_sha_bits(
-        cs.namespace(|| "pub_msg"),
-        &public.message_words,
-        message,
-    )?;
-
-    let r_bits: Vec<Boolean> = bytes_to_bits_be(r).into_iter().map(Boolean::constant).collect();
-    let mut preimage_bits = r_bits;
-    preimage_bits.extend(pk_bits);
-    preimage_bits.extend(msg_bits.into_iter().take(mlen * 8));
-
-    let seed_hash_bits = sha256(cs.namespace(|| "hm_seed"), &preimage_bits)?;
-
-    let pk_seed_bits: Vec<Boolean> = bytes_to_bits_be(&pk[..SPX_N])
-        .into_iter()
-        .map(Boolean::constant)
-        .collect();
-    let mut seed_bits: Vec<Boolean> = bytes_to_bits_be(r).into_iter().map(Boolean::constant).collect();
-    seed_bits.extend(pk_seed_bits);
-    seed_bits.extend(seed_hash_bits);
-
-    let mgf_bits = mgf1_digest_bits(cs.namespace(|| "mgf1"), &seed_bits, SPX_DGST_BYTES)?;
-
-    let mut buf = [0u8; SPX_DGST_BYTES];
-    for (i, chunk) in buf.iter_mut().enumerate() {
-        let start = i * 8;
-        let mut byte = 0u8;
-        for (j, bit) in mgf_bits[start..start + 8].iter().enumerate() {
-            if bit.get_value().unwrap_or(false) {
-                byte |= 1 << (7 - j);
-            }
-        }
-        *chunk = byte;
-    }
-
-    Ok((mgf_bits, parse_mgf_output(&buf)))
+    hash_message_bits_from_public_muxed(cs, r, public, pk, message, mlen)
 }
 
 fn bytes_to_bits_be(bytes: &[u8]) -> Vec<bool> {
@@ -485,6 +633,57 @@ mod tests {
     use blstrs::Scalar as Fr;
     use circuit_spec::VerifyPublic;
     use crate::verify_public_io::{inputize_verify_public, pack_verify_public};
+
+    #[test]
+    fn hash_message_seed_paths_match_native() {
+        let r = [0x31u8; SPX_N];
+        let pk = [0x32u8; SPX_PK_BYTES];
+        for &mlen in &[5usize, 15, 16, 50, 100] {
+            let msg = vec![0xabu8; mlen];
+            let native = hash_message_seed_hash_native(&r, &pk, &msg, mlen);
+            let branched = match hash_message_seed_path(mlen) {
+                HashMessageSeedPath::ShortFinalize => {
+                    hash_message_seed_hash_native(&r, &pk, &msg, mlen)
+                }
+                HashMessageSeedPath::LongBlockThenFinalize => {
+                    hash_message_seed_hash_native_long(&r, &pk, &msg, mlen)
+                }
+            };
+            assert_eq!(native, branched, "mlen={mlen}");
+        }
+    }
+
+    #[test]
+    fn hash_message_variable_mlen_matches_native() {
+        let r = [0x77u8; SPX_N];
+        let pk = [0x88u8; SPX_PK_BYTES];
+        let cases: &[(usize, &[u8])] = &[
+            (5, b"short"),
+            (16, b"sixteen bytes!!!"),
+            (100, &[0xcd; 100][..]),
+        ];
+        for &(mlen, msg) in cases {
+            let mut padded = [0u8; MESSAGE_MAX_BYTES];
+            padded[..mlen].copy_from_slice(msg);
+            let stmt = VerifyPublic::from_message(pk, msg);
+            let expected_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+            let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, mlen);
+
+            let mut cs = TestConstraintSystem::<Fr>::new();
+            let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+            synthesize_hash_message_parsed_public(
+                &mut cs,
+                &r,
+                &input,
+                &pk,
+                &padded,
+                mlen,
+                &expected_mgf,
+            )
+            .expect("synth");
+            assert!(cs.is_satisfied(), "mlen={mlen}");
+        }
+    }
 
     #[test]
     fn hash_message_public_preimage_matches_native() {

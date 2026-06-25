@@ -263,6 +263,34 @@ where
     Ok(())
 }
 
+/// Public `mlen < 16` — PQClean short `hash_message` seed path (`48 + mlen < 64`).
+///
+/// # Testing
+///
+/// ```bash
+/// cargo test -p sphincs-circuit public_mlen_is_short_path
+/// ```
+pub fn public_mlen_is_short_path<Scalar, CS>(
+    mut cs: CS,
+    input: &InputizedVerifyPublic<Scalar>,
+) -> Result<Boolean, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let mlen = public_mlen_as_u32(cs.namespace(|| "mlen_short"), input)?;
+    let bits = mlen.into_bits();
+    let mut is_short = Boolean::constant(true);
+    for (i, bit) in bits.iter().enumerate().skip(4) {
+        is_short = Boolean::and(
+            cs.namespace(|| format!("mlen_short_bit_{i}")),
+            &is_short,
+            &bit.not(),
+        )?;
+    }
+    Ok(is_short)
+}
+
 /// SHA-256 preimage bit order (MSB-first per byte) for one big-endian `u32` limb.
 fn u32_word_sha_bits(word: &UInt32) -> Vec<Boolean> {
     let le = word.clone().into_bits();
@@ -467,6 +495,24 @@ mod tests {
         let input = inputize_verify_public(&mut cs, &public).expect("inputize");
         enforce_public_mlen_in_range(&mut cs, &input).expect("range");
         assert!(!cs.is_satisfied());
+    }
+
+    #[test]
+    fn public_mlen_is_short_path_detects_boundary() {
+        let pk = [0x99u8; SPHINCS_PK_BYTES];
+        for &(mlen, expect_short) in &[(5usize, true), (15, true), (16, false), (100, false)] {
+            let stmt = VerifyPublic::from_message(pk, &vec![0u8; mlen]);
+            let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, mlen);
+            let mut cs = TestConstraintSystem::<Fr>::new();
+            let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+            let is_short = public_mlen_is_short_path(&mut cs, &input).expect("path");
+            assert_eq!(
+                is_short.get_value().unwrap_or(false),
+                expect_short,
+                "mlen={mlen}"
+            );
+            assert!(cs.is_satisfied());
+        }
     }
 
     #[test]

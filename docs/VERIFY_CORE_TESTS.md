@@ -89,6 +89,8 @@ cargo test -p sphincs-circuit wrong_hm_mgf
 | `parsed_output_matches_native` | `synthesize_hash_message_parsed` + `parse_mgf_output` agree with PQClean |
 | `hash_message_public_preimage_matches_native` | SHA preimage `R‖PK‖M` built from **public** columns, not witness-only bytes |
 | `hash_message_seed_path_boundaries` | PQClean short vs long branch at `mlen=15/16` |
+| `hash_message_variable_mlen_matches_native` | Short/long muxed public `hash_message` at mlen 5 / 16 / 100 |
+| `hash_message_seed_paths_match_native` | Native long vs short seed hash agrees with single-shot SHA |
 | `native_matches_pqclean_short_message` | Native `hash_message` matches PQClean reference |
 | `wrong_hm_mgf_unsatisfies` (in `hash_msg`) | Corrupt MGF1 witness breaks constraints |
 

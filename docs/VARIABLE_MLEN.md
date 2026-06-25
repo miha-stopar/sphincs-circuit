@@ -100,7 +100,8 @@ Already enforced: [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circ
 | **C** (done) | Mux short/long native SHA paths in R1CS (no trace yet) | `hash_message_variable_mlen_matches_native` |
 | **D** (done) | Public `mlen` masks inactive message bytes in SHA preimage + full core test | `valid_signature_satisfies_core_variable_mlen`, `public_message_bits_for_mlen` |
 | **E** (partial) | Exact compression counts + trace span location | `hash_message_compression_count_exact`, `hash_message_compression_count_exact_matches_pqclean_trace` |
-| **E+** | Equate core in-gadget SHA to folded step outputs | `fold_verify_core_*` integration |
+| **E+** (partial) | Prover selects `hash_message` trace rows for fold | `hash_message_seed_chain_bound`, `fold_verify_core_hash_message_seed_chain_bound_smoke` |
+| **E++** | Equate core in-gadget SHA to folded step outputs | `fold_verify_core_*` full span linking |
 
 Do **not** block Phase 2b/full-core KATs on step E — fixed-`mlen` instances remain valid deployment mode.
 

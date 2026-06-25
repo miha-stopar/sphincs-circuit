@@ -5,7 +5,7 @@
 
 use circuit_spec::{Sha256Compression, SPHINCS_PK_BYTES};
 use crate::hash_msg::{
-    hash_message_first_block_message_bytes, hash_message_seed_path, hash_message_tail_message_bytes,
+    hash_message_seed_path, hash_message_tail_message_bytes,
     HashMessageSeedPath, HASH_MESSAGE_INBUF_BYTES, HASH_MESSAGE_PREFIX_BYTES, SPX_PK_BYTES,
 };
 use crate::thash::SPX_N;
@@ -58,6 +58,15 @@ pub struct HashMessageTraceSpan {
 impl HashMessageTraceSpan {
     pub fn total_compressions(&self) -> usize {
         self.seed.len + self.mgf1.len
+    }
+
+    /// Contiguous trace indices covering seed-SHA and MGF1.
+    pub fn full_chain(&self) -> LocalChain {
+        LocalChain {
+            start: self.seed.start,
+            end: self.mgf1.end,
+            len: self.total_compressions(),
+        }
     }
 }
 

@@ -135,6 +135,8 @@ cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_mes
 |------|----------------|
 | `fold_verify_core_hash_message_smoke` | Bound folded steps + `C_core` running **only** `hash_message` → NeutronNova prove + verify |
 | `fold_verify_core_hash_message_plain_steps` | Same core with **plain** steps (no shared link digests) — isolates core size |
+| `fold_verify_core_hash_message_seed_chain_bound_smoke` | Bound steps over **seed-SHA** rows from located `hash_message` span (`mlen=15` → 2 steps) |
+| `fold_verify_core_hash_message_trace_span_plain_steps` | Plain fold over full span (seed + MGF1 rows); verifies trace row selection |
 
 **Env:** `FOLD_VERIFY_CORE_STEPS` — power-of-two step count (default `4`).
 

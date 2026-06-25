@@ -1,11 +1,61 @@
 //! PQClean trace → `FoldStepCircuit` batching (M3).
 
-use circuit_spec::Sha256Compression;
-use sphincs_circuit::witness::{local_chain_segments, step_input_from_row, LocalChain};
+use circuit_spec::{Sha256Compression, SPHINCS_PK_BYTES};
+use sphincs_circuit::{
+    locate_hash_message_trace_span_for_mlen,
+    thash::SPX_N, witness::{local_chain_segments, step_input_from_row, LocalChain},
+    HashMessageTraceSpan,
+};
 
 use crate::bound::{bound_steps_from_inputs, FoldCoreBoundCircuit, FoldStepBoundCircuit};
 use crate::fold::FoldStepCircuit;
 use crate::packed::FoldPackedChainCircuit;
+
+/// Plain step circuits over the full `hash_message` span (seed + MGF1; not one local chain).
+pub fn hash_message_chain_prefix(
+    rows: &[Sha256Compression],
+    r: &[u8; SPX_N],
+    pk: &[u8; SPHINCS_PK_BYTES],
+    mlen: usize,
+) -> Option<(HashMessageTraceSpan, Vec<FoldStepCircuit>, Vec<([u8; 32], [u8; 32])>)> {
+    let span = locate_hash_message_trace_span_for_mlen(rows, r, pk, mlen)?;
+    let chain = span.full_chain();
+    if chain.len < 2 {
+        return None;
+    }
+    let steps = fold_steps_from_rows(&rows[chain.start..=chain.end]);
+    let links = chain_boundary_links(rows, &chain);
+    Some((span, steps, links))
+}
+
+/// Bound folded steps over the **seed-SHA** local chain (MGF1 is a separate hash).
+///
+/// Returns `None` when seed compressions are not a power of two — e.g. `mlen=15` → 2 steps.
+pub fn hash_message_seed_chain_bound(
+    rows: &[Sha256Compression],
+    r: &[u8; SPX_N],
+    pk: &[u8; SPHINCS_PK_BYTES],
+    mlen: usize,
+) -> Option<(
+    HashMessageTraceSpan,
+    Vec<FoldStepBoundCircuit>,
+    Vec<([u8; 32], [u8; 32])>,
+)> {
+    let span = locate_hash_message_trace_span_for_mlen(rows, r, pk, mlen)?;
+    let chain = span.seed.clone();
+    let n = chain.len;
+    if n < 2 || !n.is_power_of_two() {
+        return None;
+    }
+    let inputs: Vec<_> = rows[chain.start..=chain.end]
+        .iter()
+        .map(step_input_from_row)
+        .collect();
+    let links = chain_boundary_links(rows, &chain);
+    let digests = link_digests_from_boundary(&links);
+    let bound = bound_steps_from_inputs(&inputs, n, digests);
+    Some((span, bound, links))
+}
 
 /// First `n` compressions in trace order (global index, not necessarily a local chain).
 pub fn fold_steps_prefix(rows: &[Sha256Compression], n: usize) -> Vec<FoldStepCircuit> {

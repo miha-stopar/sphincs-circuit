@@ -28,7 +28,8 @@ use circuit_spec::Sha256Compression;
 use spartan2::traits::circuit::SpartanCircuit;
 use sphincs_circuit::hash_message_mgf_buf;
 use sphincs_prover::{
-    fold_and_prove, longest_chain_bound, padded_message, setup_with_proto, sig_r, verify_proof,
+    fold_and_prove, hash_message_compression_count_exact, hash_message_full_span_plain,
+    longest_chain_bound, padded_message, setup_with_proto, sig_r, verify_proof,
     FoldVerifyCoreCircuit,
 };
 use sphincs_ref::{sign_deterministic, verify_with_trace, CRYPTO_SEEDBYTES};
@@ -77,6 +78,57 @@ fn fold_verify_core_hash_message_public_io_smoke() {
         links.len(),
         VERIFY_PUBLIC_NUM_SCALARS,
     );
+
+    let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
+    let proof = fold_and_prove(&pk_fold, &steps, &core);
+    verify_proof(&vk, &proof, steps.len());
+}
+
+/// Phase 2c + E+++: public IO with trace-linked `hash_message` seed-SHA (`mlen=4` → 2 compressions).
+#[test]
+fn fold_verify_core_hash_message_public_io_trace_linked_smoke() {
+    let seed = [0x49u8; CRYPTO_SEEDBYTES];
+    let msg = b"span";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+
+    let (message, mlen) = padded_message(msg);
+    assert_eq!(hash_message_compression_count_exact(mlen), 2);
+
+    let r = sig_r(&sig);
+    let (_span, steps, trace_inputs) =
+        hash_message_full_span_plain(&rows, &r, &pk, mlen).expect("power-of-two span");
+
+    let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+    let core = FoldVerifyCoreCircuit::hash_message(pk, message, mlen, r, hm_mgf, vec![])
+        .with_hash_message_trace(trace_inputs)
+        .with_public_io();
+
+    let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
+    let proof = fold_and_prove(&pk_fold, &steps, &core);
+    verify_proof(&vk, &proof, steps.len());
+}
+
+/// Step F: public `mlen` not tied to synthesis constant; seed-SHA via trace + fold.
+#[test]
+fn fold_verify_core_hash_message_variable_public_mlen_trace_smoke() {
+    let seed = [0x4au8; CRYPTO_SEEDBYTES];
+    let msg = b"span";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+
+    let (message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let (_span, steps, trace_inputs) =
+        hash_message_full_span_plain(&rows, &r, &pk, mlen).expect("span");
+
+    let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+    let core = FoldVerifyCoreCircuit::hash_message(pk, message, mlen, r, hm_mgf, vec![])
+        .with_hash_message_trace(trace_inputs)
+        .with_public_io()
+        .with_variable_public_mlen();
 
     let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
     let proof = fold_and_prove(&pk_fold, &steps, &core);

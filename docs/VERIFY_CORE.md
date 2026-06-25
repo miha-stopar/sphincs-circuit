@@ -91,7 +91,7 @@ Rollout is deliberately **staged** so NeutronNova integration can be debugged be
 | **2a** | `HashMessage` | `enforce_message_padding` + `synthesize_hash_message` + shared link checks | `fold_verify_core_hash_message` | ✅ CI |
 | **2b** | `Full` | `synthesize_verify_core` (entire PQClean verify path) + shared link checks | `fold_verify_core_full_*` (`#[ignore]`, release) | ✅ setup verified |
 | **2c** | `public_io` on [`FoldVerifyCoreCircuit`] | Public `(mlen, PK, M)` via `inputize` (fixed `mlen` per instance) | `fold_verify_core_hash_message_public_io` | ✅ CI |
-| **2c+** | Variable public `mlen` | Muxed SHA preimage + trace compression alignment | See [VARIABLE_MLEN.md](VARIABLE_MLEN.md) | Planned |
+| **2c+** | Variable public `mlen` | Trace-linked seed + dynamic public tail; `with_variable_public_mlen` | See [VARIABLE_MLEN.md](VARIABLE_MLEN.md) | Partial |
 
 See [HACKMD §Phase 2](HACKMD_NEUTRONNOVA_PLAN.md) for the public `mlen` table.
 
@@ -184,7 +184,7 @@ cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_mes
 
 ## What is NOT done yet (Phase 2c+)
 
-1. **Variable public `mlen`** — design + helpers in [VARIABLE_MLEN.md](VARIABLE_MLEN.md); muxed preimage / incremental SHA in `hash_message_bits`.
+1. **Variable public `mlen` (partial)** — [`with_variable_public_mlen`](../crates/sphincs-prover/src/verify_core.rs) + trace-linked seed; full universal circuit (all `mlen` topologies, one setup) in [VARIABLE_MLEN.md](VARIABLE_MLEN.md).
 2. **In-circuit tree/leaf bit mux** — addresses still use synthesis-time constants from parsed mgf witness (optional hardening; see [CIRCUIT.md](CIRCUIT.md)).
 3. **Full trace scale** — tests use 4-step chain prefix, not ~2k compressions.
 4. **`hash_message` trace linking (done)** — [`synthesize_hash_message_with_trace`](../crates/sphincs-circuit/src/hash_message_trace.rs) wires **seed-SHA** compressions to NeutronNova `shared` links; **MGF1** is proved by folded `C_step` rows while the core derives MGF1 one-shot from the linked seed. **`thash` / FORS / hypertree** still use in-gadget SHA.

@@ -187,6 +187,108 @@ where
     Ok(())
 }
 
+/// Tie public `pk` and padded `message` columns to witness byte buffers (no `mlen` equality).
+///
+/// Used when [`sphincs_prover::FoldVerifyCoreCircuit::variable_public_mlen`] is enabled: the
+/// verifier-supplied `mlen` scalar is authoritative; witness buffers must match `PK` / `M` only.
+pub fn enforce_public_matches_pk_message<Scalar, CS>(
+    mut cs: CS,
+    input: &InputizedVerifyPublic<Scalar>,
+    pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8; MESSAGE_MAX_BYTES],
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let pk_native = state_bytes_to_words(pk);
+    for (i, &w) in pk_native.iter().enumerate() {
+        let word = UInt32::alloc(cs.namespace(|| format!("stmt_pk_{i}")), Some(w))?;
+        enforce_num_eq_u32(
+            cs.namespace(|| format!("pk_eq_{i}")),
+            &input.pk_words[i],
+            &word,
+        )?;
+    }
+
+    let mut word_idx = 0;
+    for (chunk_i, chunk) in message.chunks_exact(32).enumerate() {
+        let mut block = [0u8; 32];
+        block.copy_from_slice(chunk);
+        for (j, w) in state_bytes_to_words(&block).iter().enumerate() {
+            let word = UInt32::alloc(cs.namespace(|| format!("stmt_msg_{chunk_i}_{j}")), Some(*w))?;
+            enforce_num_eq_u32(
+                cs.namespace(|| format!("msg_eq_{chunk_i}_{j}")),
+                &input.message_words[word_idx],
+                &word,
+            )?;
+            word_idx += 1;
+        }
+    }
+    assert_eq!(word_idx, VERIFY_PUBLIC_MSG_SCALARS);
+
+    Ok(())
+}
+
+fn enforce_u32_zero_unless_active<Scalar, CS>(
+    mut cs: CS,
+    active: &Boolean,
+    num: &AllocatedNum<Scalar>,
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let hint = num.get_value().and_then(|s| scalar_u32_hint(s));
+    let word = UInt32::alloc(cs.namespace(|| "word"), hint)?;
+    enforce_num_eq_u32(cs.namespace(|| "word_eq"), num, &word)?;
+    let inactive = active.not();
+    for (i, bit) in word.into_bits().into_iter().enumerate() {
+        let bad = Boolean::and(cs.namespace(|| format!("inactive_bit_{i}")), &bit, &inactive)?;
+        Boolean::enforce_equal(
+            cs.namespace(|| format!("inactive_zero_{i}")),
+            &bad,
+            &Boolean::constant(false),
+        )?;
+    }
+    Ok(())
+}
+
+/// Enforce `message[mlen..MESSAGE_MAX_BYTES] == 0` on public message words using **public** `mlen`.
+///
+/// Step F toward variable public `mlen`: inactive full 32-byte chunks are zeroed based on the
+/// inputized `mlen` scalar (not a synthesis-time constant).
+pub fn enforce_public_inactive_chunks_zero_variable<Scalar, CS>(
+    mut cs: CS,
+    input: &InputizedVerifyPublic<Scalar>,
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let mlen = public_mlen_as_u32(cs.namespace(|| "mlen_tail"), input)?;
+    let chunks = MESSAGE_MAX_BYTES / 32;
+    let words_per_chunk = VERIFY_PUBLIC_MSG_SCALARS / chunks;
+
+    for chunk in 0..chunks {
+        let chunk_start = (chunk * 32) as u32;
+        let has_active_byte = public_mlen_geq_constant(
+            cs.namespace(|| format!("chunk_active_{chunk}")),
+            &mlen,
+            chunk_start + 1,
+        )?;
+        let base = chunk * words_per_chunk;
+        for j in 0..words_per_chunk {
+            enforce_u32_zero_unless_active(
+                cs.namespace(|| format!("inactive_{chunk}_{j}")),
+                &has_active_byte,
+                &input.message_words[base + j],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn scalar_u32_hint<Scalar: PrimeField>(s: Scalar) -> Option<u32> {
     let repr = s.to_repr();
     let bytes = repr.as_ref();
@@ -547,6 +649,39 @@ mod tests {
             stmt.mlen,
         )
         .expect("enforce");
+        assert!(!cs.is_satisfied());
+    }
+
+    #[test]
+    fn enforce_public_matches_pk_message_accepts_honest_without_mlen_tie() {
+        let stmt = VerifyPublic::from_message([0x66u8; 32], b"pk msg only");
+        let mut public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
+        public[0] = Fr::from((stmt.mlen + 3) as u64);
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        enforce_public_matches_pk_message(&mut cs, &input, &stmt.pk, &stmt.message).expect("pk/msg");
+        assert!(cs.is_satisfied());
+    }
+
+    #[test]
+    fn enforce_public_inactive_chunks_zero_variable_accepts_honest_padding() {
+        let stmt = VerifyPublic::from_message([0x44u8; 32], b"tail must be zero on public M");
+        let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        enforce_public_inactive_chunks_zero_variable(&mut cs, &input).expect("tail");
+        assert!(cs.is_satisfied());
+    }
+
+    #[test]
+    fn enforce_public_inactive_chunks_zero_variable_rejects_nonzero_tail_chunk() {
+        let mut stmt = VerifyPublic::from_message([0x55u8; 32], b"short");
+        stmt.message[64] = 0x01;
+        let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        enforce_public_inactive_chunks_zero_variable(&mut cs, &input).expect("tail");
         assert!(!cs.is_satisfied());
     }
 

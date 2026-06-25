@@ -71,7 +71,8 @@ pub use verify::{
     SIG_AFTER_FORS, SIG_R_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
 };
 pub use verify_public_io::{
-    enforce_public_inactive_chunks_zero, enforce_public_matches_statement,
+    enforce_public_inactive_chunks_zero, enforce_public_inactive_chunks_zero_variable,
+    enforce_public_matches_pk_message, enforce_public_matches_statement,
     enforce_public_mlen_in_range, inputize_verify_public, pack_verify_public,
     public_message_bits_for_mlen, public_message_sha_bits, public_mlen_as_u32,
     public_mlen_geq_constant, public_mlen_is_short_path, public_pk_sha_bits,

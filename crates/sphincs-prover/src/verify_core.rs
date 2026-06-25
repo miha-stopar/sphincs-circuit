@@ -48,7 +48,8 @@ use spartan2::traits::{circuit::SpartanCircuit, Engine};
 use sphincs_circuit::{
     alloc_digest_shared, enforce_bytes_eq_shared, enforce_message_padding, link_shared_slice,
     inputize_verify_public, pack_verify_public, enforce_public_matches_statement,
-    enforce_public_inactive_chunks_zero, enforce_public_mlen_in_range,
+    enforce_public_matches_pk_message, enforce_public_inactive_chunks_zero,
+    enforce_public_inactive_chunks_zero_variable, enforce_public_mlen_in_range,
     synthesize_hash_message_parsed_public,
     synthesize_hash_message, synthesize_verify_core, synthesize_verify_core_public,
     synthesize_hash_message_with_trace,
@@ -130,6 +131,9 @@ pub struct FoldVerifyCoreCircuit {
     /// When true, expose `(mlen, PK, M_padded)` via Spartan `public_values` + `inputize`.
     /// See `sphincs_circuit::verify_public_io` and `docs/VERIFY_CORE.md` §Public Spartan IO.
     pub public_io: bool,
+    /// When true with `public_io`, public `mlen` is not tied to a synthesis-time constant.
+    /// `hash_message` seed-SHA should use [`Self::with_hash_message_trace`] (folded compressions).
+    pub variable_public_mlen: bool,
     _p: PhantomData<Scalar>,
 }
 
@@ -155,6 +159,7 @@ impl FoldVerifyCoreCircuit {
             link_digests,
             hash_message_trace: None,
             public_io: false,
+            variable_public_mlen: false,
             _p: PhantomData,
         }
     }
@@ -186,6 +191,15 @@ impl FoldVerifyCoreCircuit {
     /// Wire full `hash_message` span (seed + MGF1) from PQClean compression rows.
     pub fn with_hash_message_trace(mut self, trace: HashMessageTraceInputs) -> Self {
         self.hash_message_trace = Some(trace);
+        self
+    }
+
+    /// Public `mlen` is chosen at prove time (not constrained to a synthesis-time constant).
+    ///
+    /// Requires [`Self::with_public_io`] and [`Self::with_hash_message_trace`] for `hash_message`
+    /// seed-SHA (variable-length SHA cannot use fixed in-gadget preimages).
+    pub fn with_variable_public_mlen(mut self) -> Self {
+        self.variable_public_mlen = true;
         self
     }
 
@@ -222,6 +236,7 @@ impl FoldVerifyCoreCircuit {
             link_digests,
             hash_message_trace: None,
             public_io: false,
+            variable_public_mlen: false,
             _p: PhantomData,
         }
     }
@@ -285,27 +300,61 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                         &self.message,
                         self.mlen,
                     )?;
-                    synthesize_hash_message_parsed_public(
-                        cs.namespace(|| "hash_message"),
-                        &self.r,
-                        &input,
-                        &self.pk,
-                        &self.message,
-                        self.mlen,
-                        &self.hm_mgf,
-                    )?;
-                    enforce_public_matches_statement(
-                        cs.namespace(|| "public_stmt"),
-                        &input,
-                        &self.pk,
-                        &self.message,
-                        self.mlen,
-                    )?;
-                    enforce_public_inactive_chunks_zero(
-                        cs.namespace(|| "public_tail"),
-                        &input,
-                        self.mlen,
-                    )?;
+
+                    if let Some(ref trace) = self.hash_message_trace {
+                        synthesize_hash_message_with_trace(
+                            cs.namespace(|| "hash_message_trace"),
+                            &self.r,
+                            &self.pk,
+                            trace,
+                            &self.hm_mgf,
+                            shared,
+                        )?;
+                    } else {
+                        synthesize_hash_message_parsed_public(
+                            cs.namespace(|| "hash_message"),
+                            &self.r,
+                            &input,
+                            &self.pk,
+                            &self.message,
+                            self.mlen,
+                            &self.hm_mgf,
+                        )?;
+                    }
+
+                    if self.variable_public_mlen {
+                        enforce_public_matches_pk_message(
+                            cs.namespace(|| "public_stmt"),
+                            &input,
+                            &self.pk,
+                            &self.message,
+                        )?;
+                        enforce_public_inactive_chunks_zero_variable(
+                            cs.namespace(|| "public_tail"),
+                            &input,
+                        )?;
+                    } else {
+                        enforce_public_matches_statement(
+                            cs.namespace(|| "public_stmt"),
+                            &input,
+                            &self.pk,
+                            &self.message,
+                            self.mlen,
+                        )?;
+                        enforce_public_inactive_chunks_zero(
+                            cs.namespace(|| "public_tail"),
+                            &input,
+                            self.mlen,
+                        )?;
+                    }
+
+                    if !self.link_digests.is_empty() {
+                        enforce_core_shared_links(
+                            &mut cs.namespace(|| "links"),
+                            shared,
+                            &self.link_digests,
+                        )?;
+                    }
                 } else if let Some(ref trace) = self.hash_message_trace {
                     enforce_message_padding(
                         cs.namespace(|| "msg_pad"),
@@ -320,6 +369,13 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                         &self.hm_mgf,
                         shared,
                     )?;
+                    if !self.link_digests.is_empty() {
+                        enforce_core_shared_links(
+                            &mut cs.namespace(|| "links"),
+                            shared,
+                            &self.link_digests,
+                        )?;
+                    }
                 } else {
                     enforce_message_padding(
                         cs.namespace(|| "msg_pad"),

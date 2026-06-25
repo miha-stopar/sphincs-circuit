@@ -152,6 +152,8 @@ cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_mes
 | Test | What it checks |
 |------|----------------|
 | `fold_verify_core_hash_message_public_io_smoke` | Phase 2a + **`with_public_io()`**: 1033 public scalars, SHA preimage from public `PK`/`M`, end-to-end prove/verify |
+| `fold_verify_core_hash_message_public_io_trace_linked_smoke` | `public_io` + trace-linked seed-SHA (step E+++ + 2c) |
+| `fold_verify_core_hash_message_variable_public_mlen_trace_smoke` | Step F: `with_variable_public_mlen` + trace (public `mlen` not tied to synthesis constant) |
 
 ### Witness builder (`verify_witness.rs`)
 

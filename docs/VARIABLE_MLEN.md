@@ -1,6 +1,6 @@
 # Variable public `mlen` — design notes (Phase 2c+)
 
-**Status:** steps E–E+++ done for `hash_message` trace alignment (counts, span location, seed/MGF1 core↔fold linking). Variable public `mlen` in one universal circuit remains future work.
+**Status:** steps E–E+++ done for `hash_message` trace alignment. **Step F (partial):** variable public `mlen` statement checks + trace-linked `hash_message` in `C_core` (`with_variable_public_mlen`). One universal circuit with runtime `mlen` across all compression topologies remains future work.
 
 **Related:** [VERIFY_CORE.md](VERIFY_CORE.md) · [FOLDING.md](FOLDING.md) §4.2 · [HACKMD_NEUTRONNOVA_PLAN.md](HACKMD_NEUTRONNOVA_PLAN.md) §Phase 2 `mlen` table
 
@@ -103,6 +103,8 @@ Already enforced: [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circ
 | **E+** (done) | Prover selects `hash_message` trace rows for fold | `hash_message_seed_chain_bound`, `hash_message_full_span_plain` |
 | **E++** (done) | Core seed-SHA wired to shared fold links | `synthesize_hash_message_with_trace`, `with_seed_trace` |
 | **E+++** (done) | Full-span fold + trace-linked core (seed trace, MGF1 via fold `C_step`) | `fold_verify_core_hash_message_full_trace_linked_smoke` |
+| **F** (partial) | Public `mlen` not tied to synthesis constant; trace-linked seed + dynamic tail zero | `enforce_public_matches_pk_message`, `fold_verify_core_hash_message_variable_public_mlen_trace_smoke` |
+| **F+** (planned) | `public_io` + trace on full verify; one setup for all `mlen` topologies | — |
 
 Do **not** block Phase 2b/full-core KATs on step E — fixed-`mlen` instances remain valid deployment mode.
 

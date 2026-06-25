@@ -7,7 +7,37 @@ This document describes **Phase 2** of porting the M2 verify gadgets (`sphincs-c
 ### Phase 2c status (in progress)
 
 - **Done:** Removed separate `hm_expected` from `FoldVerifyCoreCircuit` / `synthesize_verify_core`. Parsed fields come from witness `mgf_bits` enforced against `hm_mgf` ([`synthesize_hash_message_parsed`](../crates/sphincs-circuit/src/hash_msg.rs)).
-- **Remaining:** Public Spartan IO (`PK`, `M`, `mlen`), optional in-circuit tree/leaf bit mux into address gadgets, `intermediate_roots` / `chain_lengths` from witness.
+- **Done (step 1):** Public Spartan IO for fixed `(PK, M, mlen)` per circuit — [`with_public_io`](../crates/sphincs-prover/src/verify_core.rs), encoding in [`verify_public_io.rs`](../crates/sphincs-circuit/src/verify_public_io.rs), test `fold_verify_core_hash_message_public_io`.
+- **Done (step 2):** WOTS topology from chained `root_bits` via [`witness_bytes_from_bits`](../crates/sphincs-circuit/src/thash.rs) — no `intermediate_roots` field on `FoldVerifyCoreCircuit`.
+- **Remaining:** Variable public `mlen` in one universal circuit; optional in-circuit tree/leaf bit mux; max-unroll WOTS `chain_lengths`.
+
+---
+
+## Public Spartan IO (Phase 2c step 1)
+
+When [`FoldVerifyCoreCircuit::public_io`] is true, `public_values()` returns **1033** scalars
+(`circuit_spec::VERIFY_PUBLIC_NUM_SCALARS`) encoding the statement from [DECISIONS.md](DECISIONS.md):
+
+| Segment | Scalars | Encoding |
+|---------|---------|----------|
+| `mlen` | 1 | `Scalar::from(mlen)` |
+| `pk` | 8 | `state_bytes_to_words` on 32-byte PK |
+| `message` | 1024 | 128 × 32-byte chunks, 8 SHA-state words each |
+
+Implementation: [`verify_public_io.rs`](../crates/sphincs-circuit/src/verify_public_io.rs). Each scalar is
+`inputize`d in `precommitted()` and constrained to match the bytes fed into verify gadgets via
+[`enforce_public_matches_statement`](../crates/sphincs-circuit/src/verify_public_io.rs).
+
+**Limitation:** `mlen` is still a **synthesis-time constant** for `hash_message_bits` SHA length; the
+public scalar must equal that constant. One universal circuit accepting runtime `mlen` needs muxed
+preimage (later step).
+
+**Tests:**
+
+```bash
+cargo test -p sphincs-circuit verify_public_io::
+cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_message_public_io
+```
 
 ---
 
@@ -46,7 +76,7 @@ M2 implemented the full PQClean verify pipeline in bellpepper as [`synthesize_ve
 | `shared()` | `alloc_digest_shared` for each `link_digests[k]` (24 field elems when `num_links=3`) |
 | `precommitted()` | Phase gadget + `enforce_bytes_eq_shared` on links + dummy `inputize core_x` |
 | `synthesize()` | Empty (all constraints in `precommitted`, like other fold circuits) |
-| `public_values()` | `[0]` placeholder until Phase 2c public `PK, M, mlen` |
+| `public_values()` | `[0]` placeholder, or **1033** scalars when `public_io` — see §Public Spartan IO |
 
 ---
 
@@ -58,7 +88,8 @@ Rollout is deliberately **staged** so NeutronNova integration can be debugged be
 |-------|------|--------------------------|------------------|--------|
 | **2a** | `HashMessage` | `enforce_message_padding` + `synthesize_hash_message` + shared link checks | `fold_verify_core_hash_message` | ✅ CI |
 | **2b** | `Full` | `synthesize_verify_core` (entire PQClean verify path) + shared link checks | `fold_verify_core_full_*` (`#[ignore]`, release) | ✅ setup verified |
-| **2c** | (future) | Same + public `inputize` for `PK`, `M`, `mlen` | TBD | Planned |
+| **2c** | `public_io` on [`FoldVerifyCoreCircuit`] | Public `(mlen, PK, M)` via `inputize` (fixed `mlen` per instance) | `fold_verify_core_hash_message_public_io` | ✅ CI |
+| **2c+** | (future) | Variable public `mlen`, full trace KAT | TBD | Planned |
 
 See [HACKMD §Phase 2](HACKMD_NEUTRONNOVA_PLAN.md) for the public `mlen` table.
 
@@ -89,8 +120,8 @@ root == PK.root
 | Field | Source | In-circuit enforcement |
 |-------|--------|------------------------|
 | `signature` | Private witness (7856 B) | Wired inside FORS/WOTS/Merkle gadgets |
-| `hm_mgf` | PQClean `hash_message_mgf_buf` | ✅ `mgf_bits == hm_mgf`; `mhash`/`tree`/`leaf_idx` parsed from same witness bits at synthesis |
-| `intermediate_roots` | PQClean layer replay | ⚠️ witness tied via `enforce_bits_equal_bytes`; WOTS topology from synthesis-time bytes |
+| `hm_mgf` | PQClean `hash_message_mgf_buf` | ✅ `mgf_bits == hm_mgf`; parsed fields from same witness bits |
+| *(removed)* `intermediate_roots` | — | ✅ WOTS `chain_lengths` from witness `root_bits` via [`witness_bytes_from_bits`](../crates/sphincs-circuit/src/thash.rs) |
 
 ---
 
@@ -104,18 +135,13 @@ The prover does **not** derive all hints inside the R1CS yet. [`verify_witness.r
     ├─ padded_message(msg) → (message[4096], mlen)
     ├─ sig_r(sig) → r
     ├─ hash_message_mgf_buf → hm_mgf (30 B, enforced in-circuit)
-    ├─ parse_mgf_output(hm_mgf) → { mhash, tree, leaf_idx } (native replay only)
-    └─ intermediate_roots_oracle(pk, sig, parsed) → [[u8;16]; 7]
-           │
-           ▼
-    FoldVerifyCoreCircuit::full(...)   // no separate hm_expected field
+    └─ FoldVerifyCoreCircuit::full(...)   // no hm_expected, no intermediate_roots
 ```
 
 **Consistency obligation:**
 
 1. `hm_mgf == hash_message_mgf_buf(r, pk, msg, mlen)` (enforced in R1CS)
-2. `intermediate_roots[layer]` = root before WOTS on layer `layer` (PQClean replay using `parse_mgf_output(hm_mgf)`)
-3. `link_digests[k]` = trace bytes at local-chain boundaries (when using bound steps)
+2. `link_digests[k]` = trace bytes at local-chain boundaries (when using bound steps)
 
 ---
 
@@ -126,6 +152,7 @@ The prover does **not** derive all hints inside the R1CS yet. [`verify_witness.r
 | `hash_msg::tests::parsed_output_matches_native` | — | Phase 2c: `synthesize_hash_message_parsed` + `parse_mgf_output` agree with PQClean | ✅ runs |
 | `verify::tests::wrong_hm_mgf_unsatisfies_parsed_hash_message` | — | Corrupt `hm_mgf` breaks `mgf_bits == hm_mgf` | ✅ runs |
 | [`fold_verify_core_hash_message.rs`](../crates/sphincs-prover/tests/fold_verify_core_hash_message.rs) | `smoke`, `plain_steps` | Phase 2a end-to-end prove/verify | ✅ runs |
+| [`fold_verify_core_hash_message_public_io.rs`](../crates/sphincs-prover/tests/fold_verify_core_hash_message_public_io.rs) | `smoke` | Phase 2c public IO (1033 scalars) | ✅ runs |
 | [`fold_verify_core_full.rs`](../crates/sphincs-prover/tests/fold_verify_core_full.rs) | `full_setup` | Phase 2b `NeutronNovaZkSNARK::setup` (R1CS shape + equalize) | `#[ignore]` (~7 min release) |
 | | `full_prep_prove` | Witness generation for full core | `#[ignore]` |
 | | `full_smoke` | Full prove + verify with bound steps | `#[ignore]` |
@@ -152,7 +179,7 @@ FOLD_VERIFY_CORE_STEPS=8 cargo test ...
 
 ## What is NOT done yet (Phase 2c+)
 
-1. **Public Spartan IO** — `PK`, padded `M`, `mlen` via `public_values()` + `inputize` (see [HACKMD §Phase 2](HACKMD_NEUTRONNOVA_PLAN.md)).
+1. **Variable public `mlen`** — muxed preimage / incremental SHA in `hash_message_bits` (one universal circuit).
 2. **In-circuit tree/leaf bit mux** — addresses still use synthesis-time constants from parsed mgf witness (optional hardening; see [CIRCUIT.md](CIRCUIT.md)).
 3. **Full trace scale** — tests use 4-step chain prefix, not ~2k compressions.
 4. **Trace ↔ core SHA linking** — `synthesize_verify_core` still uses in-gadget SHA for `hash_message` / `thash`; compression trace rows are not yet equated to folded step outputs inside the core (shared links pin digests only at chain boundaries).
@@ -167,5 +194,7 @@ FOLD_VERIFY_CORE_STEPS=8 cargo test ...
 | `crates/sphincs-circuit/src/verify.rs` | `synthesize_verify_core`, padding policy |
 | `crates/sphincs-prover/src/verify_core.rs` | `FoldVerifyCoreCircuit`, `VerifyCorePhase`, Spartan hooks |
 | `crates/sphincs-prover/src/verify_witness.rs` | PQClean → circuit builder (`pqclean` feature) |
+| `crates/sphincs-circuit/src/verify_public_io.rs` | Public Spartan IO pack / inputize / enforce |
 | `crates/sphincs-prover/tests/fold_verify_core_hash_message.rs` | Phase 2a NeutronNova tests |
+| `crates/sphincs-prover/tests/fold_verify_core_hash_message_public_io.rs` | Phase 2c public IO NeutronNova test |
 | `crates/sphincs-prover/tests/fold_verify_core_full.rs` | Phase 2b NeutronNova tests |

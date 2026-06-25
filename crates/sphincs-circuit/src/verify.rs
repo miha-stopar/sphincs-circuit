@@ -21,8 +21,8 @@
 //! bits at synthesis time ([`hash_message_output_from_mgf_bits`]). There is no separate trusted
 //! `hm_expected` parameter.
 //!
-//! **Remaining trusted hint:** [`intermediate_roots`] (WOTS `chain_lengths` topology) — see
-//! `docs/CIRCUIT.md` §Synthesis-time hints.
+//! **WOTS topology:** `chain_lengths` follow witness root bits via [`crate::thash::witness_bytes_from_bits`]
+//! in [`crate::hypertree::hypertree_layer_from_root_bits`] — no `intermediate_roots` oracle.
 
 use crate::fors::{fors_pk_from_sig_bits, SPX_FORS_BYTES};
 use crate::hash_msg::{synthesize_hash_message_parsed, SPX_DGST_BYTES, SPX_PK_BYTES};
@@ -135,21 +135,11 @@ where
     Ok(())
 }
 
-/// In-circuit verify core: returns `true` in witness terms when all constraints
-/// are satisfied. `intermediate_roots` supplies the 16-byte root before each
-/// hypertree layer (index 0 = FORS pk, 1..=7 = output of previous layer) for
-/// WOTS `chain_lengths` structure at synthesis time.
+/// In-circuit verify core when all constraints are satisfied.
 ///
-/// `mhash` / `tree` / `leaf_idx` are derived from witness `mgf_bits` via
-/// [`synthesize_hash_message_parsed`] (not a separate trusted parameter).
-///
-/// **Trusted witness prep (remaining):** [`intermediate_roots`] — see `docs/CIRCUIT.md`.
-///
-/// # Parameters
-///
-/// - `hm_mgf` — raw 30-byte MGF1 output; enforced in R1CS (`mgf_bits == hm_mgf`). Parsed fields
-///   used downstream come from these witness bits via [`synthesize_hash_message_parsed`].
-/// - `intermediate_roots` — trusted synthesis hint for WOTS `chain_lengths` per hypertree layer.
+/// `mhash` / `tree` / `leaf_idx` come from witness `mgf_bits` via [`synthesize_hash_message_parsed`].
+/// Hypertree layers chain `root_bits` from FORS through WOTS/Merkle; WOTS topology uses
+/// [`witness_bytes_from_bits`] on those roots (no `intermediate_roots` oracle).
 #[allow(clippy::too_many_arguments)]
 pub fn synthesize_verify_core<Scalar, CS>(
     mut cs: CS,
@@ -158,7 +148,6 @@ pub fn synthesize_verify_core<Scalar, CS>(
     mlen: usize,
     signature: &[u8; SPHINCS_SIG_BYTES],
     hm_mgf: &[u8; SPX_DGST_BYTES],
-    intermediate_roots: &[[u8; SPX_N]; SPX_D],
 ) -> Result<(), SynthesisError>
 where
     Scalar: ff::PrimeField,
@@ -217,16 +206,10 @@ where
         &fors_sig,
         &mhash,
     )?;
-    enforce_bits_equal_bytes(
-        cs.namespace(|| "fors_pk"),
-        &fors_pk_bits,
-        &intermediate_roots[0],
-    )?;
-
     let mut root_bits = fors_pk_bits;
     let mut sig_off = SIG_AFTER_FORS;
 
-    // 3. Seven hypertree layers
+    // 3. Seven hypertree layers — root_bits chains layer to layer.
     for layer in 0..SPX_D {
         let mut wots_addr = [0u8; ADDR_BYTES];
         wots_addr = set_type(&wots_addr, SPX_ADDR_TYPE_WOTS);
@@ -251,7 +234,6 @@ where
         let auth = &signature[sig_off..sig_off + SPX_TREE_AUTH_BYTES];
         sig_off += SPX_TREE_AUTH_BYTES;
 
-        let root_in_bytes = intermediate_roots[layer];
         root_bits = hypertree_layer_from_root_bits(
             cs.namespace(|| format!("layer_{layer}")),
             &pub_seed,
@@ -260,7 +242,6 @@ where
             &tree_addr,
             &sig_wots,
             &root_bits,
-            &root_in_bytes,
             idx_leaf,
             auth,
         )?;
@@ -278,94 +259,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash_msg::{hash_message_mgf_buf, HashMessageOutput};
+    use crate::hash_msg::hash_message_mgf_buf;
     use bellpepper_core::test_cs::TestConstraintSystem;
     use blstrs::Scalar as Fr;
-    use sphincs_ref::{sign_deterministic, CRYPTO_SEEDBYTES, SPHINCS_PK_BYTES, SPHINCS_SIG_BYTES};
-
-    /// Simulate PQClean verify to collect intermediate roots for circuit structure.
-    fn intermediate_roots_oracle(
-        pk: &[u8; SPHINCS_PK_BYTES],
-        sig: &[u8; SPHINCS_SIG_BYTES],
-        hm: &HashMessageOutput,
-    ) -> [[u8; SPX_N]; SPX_D] {
-        let pub_seed = {
-            let mut s = [0u8; 16];
-            s.copy_from_slice(&pk[..16]);
-            s
-        };
-        let mut sig_off = SIG_AFTER_FORS;
-
-        let tree = hm.tree;
-        let idx_leaf = hm.leaf_idx;
-
-        let mut fors_addr = [0u8; 22];
-        fors_addr[9] = SPX_ADDR_TYPE_WOTS;
-        fors_addr[1..9].copy_from_slice(&tree.to_be_bytes());
-        fors_addr[12] = (idx_leaf >> 8) as u8;
-        fors_addr[13] = idx_leaf as u8;
-
-        let mut fors_sig = [0u8; SPX_FORS_BYTES];
-        fors_sig.copy_from_slice(&sig[SIG_R_BYTES..SIG_AFTER_FORS]);
-
-        let mut roots = [[0u8; 16]; SPX_D];
-        roots[0] = sphincs_ref::fors_pk_from_sig_oracle(
-            &pub_seed,
-            &fors_addr,
-            &fors_sig,
-            &hm.mhash,
-        );
-
-        let mut root = roots[0];
-        let mut tree = hm.tree;
-        let mut idx_leaf = hm.leaf_idx;
-
-        for layer in 0..SPX_D {
-            roots[layer] = root;
-
-            let mut wots_addr = [0u8; 22];
-            wots_addr[9] = SPX_ADDR_TYPE_WOTS;
-            wots_addr[1..9].copy_from_slice(&tree.to_be_bytes());
-            wots_addr[12] = (idx_leaf >> 8) as u8;
-            wots_addr[13] = idx_leaf as u8;
-
-            let mut tree_addr = [0u8; 22];
-            tree_addr[0] = layer as u8;
-            tree_addr[1..9].copy_from_slice(&tree.to_be_bytes());
-            tree_addr[9] = SPX_ADDR_TYPE_HASHTREE;
-
-            let mut wots_pk_addr = [0u8; 22];
-            wots_pk_addr[..9].copy_from_slice(&tree_addr[..9]);
-            wots_pk_addr[12] = (idx_leaf >> 8) as u8;
-            wots_pk_addr[13] = idx_leaf as u8;
-            wots_pk_addr[9] = SPX_ADDR_TYPE_WOTSPK;
-
-            let mut sig_wots = [0u8; SPX_WOTS_BYTES];
-            sig_wots.copy_from_slice(&sig[sig_off..sig_off + SPX_WOTS_BYTES]);
-            sig_off += SPX_WOTS_BYTES;
-
-            let auth = &sig[sig_off..sig_off + SPX_TREE_AUTH_BYTES];
-            sig_off += SPX_TREE_AUTH_BYTES;
-
-            let wots_pk =
-                sphincs_ref::wots_pk_from_sig_oracle(&pub_seed, &wots_addr, &sig_wots, &root);
-            let leaf = sphincs_ref::thash_oracle(&pub_seed, &wots_pk_addr, &wots_pk);
-            root = sphincs_ref::compute_root_oracle(
-                &pub_seed,
-                &tree_addr,
-                &leaf,
-                idx_leaf,
-                0,
-                auth,
-                SPX_TREE_HEIGHT,
-            );
-
-            idx_leaf = (tree & ((1u64 << SPX_TREE_HEIGHT) - 1)) as u32;
-            tree >>= SPX_TREE_HEIGHT;
-        }
-
-        roots
-    }
+    use sphincs_ref::{sign_deterministic, CRYPTO_SEEDBYTES};
 
     /// Phase 2c regression: corrupt `hm_mgf` must fail `mgf_bits == hm_mgf` (fast — hash_message only).
     ///
@@ -397,9 +294,6 @@ mod tests {
 
     /// Full M2 verify core R1CS on a PQClean KAT signature (slow).
     ///
-    /// Inputs: `hm_mgf` only (Phase 2c — no separate `hm_expected`). `intermediate_roots` from
-    /// [`intermediate_roots_oracle`] using `parse_mgf_output(hm_mgf)` for tree/leaf indices.
-    ///
     /// ```bash
     /// cargo test -p sphincs-circuit valid_signature_satisfies_core --release -- --ignored --nocapture
     /// ```
@@ -415,14 +309,7 @@ mod tests {
             a.copy_from_slice(&sig[..16]);
             a
         };
-        let hm_o = sphincs_ref::hash_message_oracle(&r, &pk, msg, msg.len());
-        let hm = HashMessageOutput {
-            mhash: hm_o.mhash,
-            tree: hm_o.tree,
-            leaf_idx: hm_o.leaf_idx,
-        };
         let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, msg.len());
-        let roots = intermediate_roots_oracle(&pk, &sig, &hm);
 
         let mut padded = vec![0u8; MESSAGE_MAX_BYTES];
         padded[..msg.len()].copy_from_slice(msg);
@@ -435,7 +322,6 @@ mod tests {
             msg.len(),
             &sig,
             &hm_mgf,
-            &roots,
         )
         .expect("synth");
         assert!(cs.is_satisfied());

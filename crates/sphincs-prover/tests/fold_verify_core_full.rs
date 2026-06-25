@@ -5,7 +5,7 @@
 //! Phase 2a (`fold_verify_core_hash_message`) only runs `hash_message` in `C_core`. Phase 2b wires
 //! the **entire** M2 verify pipeline (FORS + 7× hypertree + `root == PK.root`) via
 //! [`VerifyCorePhase::Full`]. Phase 2c removed the separate `hm_expected` oracle — witness is built
-//! via [`fold_verify_core_from_pqclean`] using `hm_mgf` + `parse_mgf_output` + `intermediate_roots_oracle`.
+//! via [`fold_verify_core_from_pqclean`] using `hm_mgf` only (no `hm_expected`, no `intermediate_roots`).
 //!
 //! **Design doc:** `docs/VERIFY_CORE.md`
 //!
@@ -178,4 +178,35 @@ fn fold_verify_core_full_plain_steps() {
     let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
     let proof = fold_and_prove(&pk_fold, &steps, &core);
     verify_proof(&vk, &proof, steps.len());
+}
+
+/// Full core + public IO (1033 scalars) — NeutronNova `setup` / equalize only.
+///
+/// ```bash
+/// cargo test -p sphincs-prover --features pqclean --release \
+///   --test fold_verify_core_full fold_verify_core_full_public_io_setup -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "full verify core + public_io setup is large; run with --release --ignored"]
+fn fold_verify_core_full_public_io_setup() {
+    use circuit_spec::VERIFY_PUBLIC_NUM_SCALARS;
+    use spartan2::traits::circuit::SpartanCircuit;
+
+    let seed = [0x49u8; CRYPTO_SEEDBYTES];
+    let msg = b"full core public io setup";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+    let n = max_steps();
+    let (_chain, steps, _old, links) = longest_chain_bound(&rows, n).expect("chain");
+    let digests: Vec<_> = links.iter().map(|(l, _)| *l).collect();
+
+    let core = fold_verify_core_from_pqclean(pk, sig, msg, digests).with_public_io();
+    assert_eq!(
+        core.public_values().expect("pv").len(),
+        VERIFY_PUBLIC_NUM_SCALARS
+    );
+
+    let (_pk_fold, _vk) = setup_with_proto(&steps[0], &core, steps.len());
+    eprintln!("full public_io setup ok: steps={n}");
 }

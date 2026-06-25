@@ -80,6 +80,23 @@ where
         .collect()
 }
 
+/// Read big-endian witness bits back to bytes (uses `Boolean::get_value()` at synthesis).
+///
+/// Used to derive WOTS [`crate::wots::chain_lengths`] from in-circuit root witness bits
+/// instead of a separate trusted `root_in_bytes` hint — see `hypertree.rs`.
+pub fn witness_bytes_from_bits<const N: usize>(bits: &[Boolean]) -> [u8; N] {
+    assert_eq!(bits.len(), N * 8);
+    let mut out = [0u8; N];
+    for (i, chunk) in bits.chunks_exact(8).enumerate() {
+        for (j, bit) in chunk.iter().enumerate() {
+            if bit.get_value().unwrap_or(false) {
+                out[i] |= 1 << (7 - j);
+            }
+        }
+    }
+    out
+}
+
 /// Core `thash` as a composable gadget: returns the 128 output bits
 /// (`SHA256(pub_seed ‖ 0^{48} ‖ addr ‖ in)[0:16]`) so the result can be wired
 /// into the next gadget (a Merkle parent, a WOTS chain step, …).

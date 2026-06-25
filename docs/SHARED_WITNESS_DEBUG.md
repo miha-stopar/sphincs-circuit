@@ -303,10 +303,9 @@ malicious witness generator could pass inconsistent values if only `hm_mgf` was 
 
 **After:** [`synthesize_hash_message_parsed`](../crates/sphincs-circuit/src/hash_msg.rs) enforces
 `mgf_bits == hm_mgf` and parses tree/leaf/mhash from those witness bits at synthesis time. The
-circuit struct has **no** `hm_expected` field. [`fold_verify_core_from_pqclean`](../crates/sphincs-prover/src/verify_witness.rs) uses [`parse_mgf_output`](../crates/sphincs-circuit/src/hash_msg.rs) on native `hm_mgf` only for `intermediate_roots_oracle` replay.
+circuit struct has **no** `hm_expected` field. WOTS topology uses chained witness `root_bits` (`witness_bytes_from_bits`) — no `intermediate_roots` on the circuit struct.
 
-**Still trusted:** `intermediate_roots` (WOTS `chain_lengths` topology). Address bytes are still
-synthesis-time `u64`/`u32` from parsed mgf witness — not in-circuit bit mux. See
+**Still trusted (optional hardening):** max-unroll WOTS `chain_lengths` independent of witness root bytes. Address bytes still synthesis-time constants from parsed mgf witness — not in-circuit bit mux. See
 [CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints and [VERIFY_CORE.md](VERIFY_CORE.md).
 
 **Tests:**

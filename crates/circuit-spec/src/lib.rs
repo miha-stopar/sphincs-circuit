@@ -17,8 +17,41 @@ pub const MESSAGE_MAX_BYTES: usize = 4096;
 pub struct VerifyPublic {
     pub pk: [u8; SPHINCS_PK_BYTES],
     /// Message padded to `MESSAGE_MAX_BYTES`; only first `mlen` bytes are active.
-    pub message: Vec<u8>,
+    pub message: [u8; MESSAGE_MAX_BYTES],
     pub mlen: usize,
+}
+
+/// Spartan public-input layout for [`VerifyPublic`].
+///
+/// Scalar order (see `docs/VERIFY_CORE.md` §Public Spartan IO):
+///
+/// ```text
+/// [ mlen | pk[8 SHA-state u32 words] | message[128 × 8 words] ]
+/// ```
+///
+/// `pk` and each 32-byte message chunk use big-endian SHA-256 state word packing
+/// ([`sphincs_circuit::sha256_compress::state_bytes_to_words`]).
+pub const VERIFY_PUBLIC_MLEN_SCALARS: usize = 1;
+/// `SPHINCS_PK_BYTES` / 32 × 8 words — one 32-byte block.
+pub const VERIFY_PUBLIC_PK_SCALARS: usize = 8;
+/// `MESSAGE_MAX_BYTES` / 32 chunks × 8 words per chunk.
+pub const VERIFY_PUBLIC_MSG_SCALARS: usize = (MESSAGE_MAX_BYTES / 32) * 8;
+/// Total `public_values().len()` for `FoldVerifyCoreCircuit` with `public_io = true`.
+pub const VERIFY_PUBLIC_NUM_SCALARS: usize =
+    VERIFY_PUBLIC_MLEN_SCALARS + VERIFY_PUBLIC_PK_SCALARS + VERIFY_PUBLIC_MSG_SCALARS;
+
+impl VerifyPublic {
+    /// Build from a short message (zero-padded tail per v1 policy).
+    pub fn from_message(pk: [u8; SPHINCS_PK_BYTES], msg: &[u8]) -> Self {
+        assert!(msg.len() <= MESSAGE_MAX_BYTES);
+        let mut message = [0u8; MESSAGE_MAX_BYTES];
+        message[..msg.len()].copy_from_slice(msg);
+        Self {
+            pk,
+            message,
+            mlen: msg.len(),
+        }
+    }
 }
 
 /// Private witness for the verifier relation.
@@ -74,6 +107,13 @@ impl VerifyWitness {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_public_scalar_layout() {
+        assert_eq!(VERIFY_PUBLIC_PK_SCALARS, 8);
+        assert_eq!(VERIFY_PUBLIC_MSG_SCALARS, 1024);
+        assert_eq!(VERIFY_PUBLIC_NUM_SCALARS, 1033);
+    }
 
     #[test]
     fn signature_size_matches_pqclean_meta() {

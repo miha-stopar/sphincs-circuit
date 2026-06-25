@@ -168,7 +168,10 @@ No trusted setup. Groth16 not used.
 - [ ] Public `mlen` in Spartan IO — **deferred:** smoke/full-core KATs use fixed `mlen` per circuit instance; variable public `mlen` + trace alignment in final v1 IO (see [HACKMD_NEUTRONNOVA_PLAN.md](HACKMD_NEUTRONNOVA_PLAN.md) §Phase 2 `mlen` table)
 - [ ] Spartan2 proof of full verify on KAT (~all trace compressions)
 - [x] Drop separate `hm_expected` — parse from `hm_mgf` witness (`synthesize_hash_message_parsed`)
-- [ ] Close remaining synthesis-time hint gaps — [CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints (`chain_lengths` from witness, public `M`/`mlen`, optional in-circuit tree/leaf mux)
+- [x] Drop `intermediate_roots` — WOTS topology from witness `root_bits` (`witness_bytes_from_bits`)
+- [x] Public Spartan IO (fixed per instance) — `with_public_io`, `verify_public_io`, `fold_verify_core_hash_message_public_io`
+- [ ] Variable public `mlen` in one universal circuit
+- [ ] Close remaining synthesis-time hint gaps — optional in-circuit tree/leaf mux, max-unroll WOTS
 - [x] Bench harness: `cargo run -p sphincs-prover --features pqclean --release --bin fold-bench -- N`
 - [ ] Benchmark: full trace prove/verify vs native verify
 

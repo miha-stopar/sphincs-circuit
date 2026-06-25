@@ -1,20 +1,18 @@
-//! PQClean-derived witness hints for [`super::FoldVerifyCoreCircuit`] with [`super::VerifyCorePhase::Full`].
+//! PQClean-derived witness for [`super::FoldVerifyCoreCircuit`] with [`super::VerifyCorePhase::Full`].
 //!
 //! # Role
 //!
 //! [`synthesize_verify_core`] needs:
 //!
 //! - `hm_mgf` — raw 30-byte MGF1 output (**enforced in R1CS**; `mhash`/`tree`/`leaf_idx` parsed from it)
-//! - `intermediate_roots` — 16-byte root before each hypertree layer (**trusted synthesis hint**)
 //! - `signature`, `pk`, padded `message`, `mlen`
 //!
-//! This module builds a [`FoldVerifyCoreCircuit`] from PQClean KATs.
+//! WOTS `chain_lengths` follow witness `root_bits` inside the gadget — **no** `intermediate_roots` field.
 //!
 //! # Consistency requirements
 //!
 //! 1. `hm_mgf == hash_message_mgf_buf(r, pk, msg, mlen)`
-//! 2. `intermediate_roots` = layer replay using `parse_mgf_output(hm_mgf)` for indices — see
-//!    [`intermediate_roots_oracle`]
+//! 2. `link_digests[k]` = trace bytes at local-chain boundaries (when using bound steps)
 //!
 //! # Testing
 //!
@@ -29,7 +27,7 @@
 use circuit_spec::{MESSAGE_MAX_BYTES, SPHINCS_PK_BYTES, SPHINCS_SIG_BYTES};
 use sphincs_circuit::{
     fors::SPX_FORS_BYTES,
-    hash_message_mgf_buf, hash_msg::HashMessageOutput, parse_mgf_output, thash::SPX_N,
+    hash_message_mgf_buf, hash_msg::HashMessageOutput, thash::SPX_N,
     SPX_D, SPX_WOTS_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
     SIG_AFTER_FORS, SIG_R_BYTES,
 };
@@ -39,11 +37,14 @@ use crate::verify_core::{padded_message, sig_r, FoldVerifyCoreCircuit};
 
 /// Replay PQClean verify to collect the 16-byte root **before** each hypertree layer.
 ///
-/// Uses `hm` (typically `parse_mgf_output(hm_mgf)`) for tree / leaf indices.
+/// **Debug / test helper only** — not required by [`FoldVerifyCoreCircuit::full`] anymore.
+/// The circuit chains `root_bits` internally; this oracle is for cross-checking native replay.
 ///
 /// # Testing
 ///
-/// Indirectly via `fold_verify_core_from_pqclean` and `fold_verify_core_full_setup`.
+/// ```bash
+/// cargo test -p sphincs-prover --features pqclean intermediate_roots_oracle -- --nocapture
+/// ```
 pub fn intermediate_roots_oracle(
     pk: &[u8; SPHINCS_PK_BYTES],
     sig: &[u8; SPHINCS_SIG_BYTES],
@@ -126,9 +127,6 @@ pub fn intermediate_roots_oracle(
 
 /// Build a Phase Full [`FoldVerifyCoreCircuit`] from a PQClean KAT `(pk, sig, msg)`.
 ///
-/// Phase 2c: passes only `hm_mgf` into the circuit (no `hm_expected`). Uses [`parse_mgf_output`]
-/// on native `hm_mgf` solely to drive [`intermediate_roots_oracle`].
-///
 /// # Testing
 ///
 /// ```bash
@@ -145,8 +143,6 @@ pub fn fold_verify_core_from_pqclean(
     let (message, mlen) = padded_message(msg);
     let r = sig_r(&sig);
     let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
-    let hm_parsed = parse_mgf_output(&hm_mgf);
-    let intermediate_roots = intermediate_roots_oracle(&pk, &sig, &hm_parsed);
     FoldVerifyCoreCircuit::full(
         pk,
         message,
@@ -154,7 +150,23 @@ pub fn fold_verify_core_from_pqclean(
         sig,
         r,
         hm_mgf,
-        intermediate_roots,
         link_digests,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sphincs_ref::{sign_deterministic, CRYPTO_SEEDBYTES};
+
+    #[test]
+    fn fold_verify_core_from_pqclean_builds_full_circuit() {
+        let seed = [1u8; CRYPTO_SEEDBYTES];
+        let msg = b"witness builder smoke";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+        let core = fold_verify_core_from_pqclean(pk, sig, msg, vec![]);
+        assert_eq!(core.phase, crate::verify_core::VerifyCorePhase::Full);
+        assert!(core.signature.is_some());
+        assert!(!core.public_io);
+    }
 }

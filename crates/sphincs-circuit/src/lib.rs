@@ -4,9 +4,8 @@
 //! **M2 (current):** full verify core sub-gadgets + top-level glue in `verify`.
 //! **M2:** complete — verify core + trace witness alignment in `witness`.
 //! **M3:** NeutronNova fold — [`FoldVerifyCoreCircuit`] in `sphincs-prover` (see `docs/VERIFY_CORE.md`).
-//! **Phase 2c:** `hm_expected` removed — parse `mhash`/`tree`/`leaf_idx` from constrained `hm_mgf`
-//! witness via [`synthesize_hash_message_parsed`] / [`parse_mgf_output`].
-//! **Next:** full trace KAT, public IO, in-circuit address bit mux, `intermediate_roots` from witness.
+//! **Phase 2c:** `hm_expected` removed; public `(mlen, PK, M)` via [`verify_public_io`].
+//! **Next:** variable public `mlen`, full trace KAT, optional in-circuit address bit mux.
 
 pub mod chain;
 pub mod shared_link;
@@ -18,6 +17,7 @@ pub mod sha256_compress;
 pub mod step;
 pub mod thash;
 pub mod verify;
+pub mod verify_public_io;
 pub mod witness;
 pub mod wots;
 
@@ -51,17 +51,21 @@ pub use chain::enforce_digest_bytes_eq_words;
 pub use step::{StepCircuit, StepInput};
 pub use thash::{
     enforce_bits_equal_bytes, synthesize_thash, synthesize_thash_with_stats, thash_digest_bits,
-    thash_preimage, ThashStats,
+    thash_preimage, witness_bytes_from_bits, ThashStats,
 };
 pub use verify::{
     enforce_message_padding, enforce_message_padding_witness, synthesize_verify_core, SPX_D,
     SIG_AFTER_FORS, SIG_R_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
+};
+pub use verify_public_io::{
+    enforce_public_matches_statement, inputize_verify_public, pack_verify_public,
+    InputizedVerifyPublic,
 };
 pub use witness::{
     local_chain_segments, step_input_from_row, trace_stats, witness_from_compressions,
     LocalChain, TraceStats,
 };
 pub use wots::{
-    chain_lengths, gen_chain, synthesize_wots_pk_from_sig, wots_pk_from_sig_bits, SPX_WOTS_BYTES,
-    SPX_WOTS_LEN,
+    chain_lengths, gen_chain, synthesize_wots_pk_from_sig, wots_pk_from_sig_bits,
+    wots_pk_from_sig_root_bits, SPX_WOTS_BYTES, SPX_WOTS_LEN,
 };

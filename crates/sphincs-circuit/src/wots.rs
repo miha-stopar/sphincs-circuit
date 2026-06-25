@@ -15,7 +15,7 @@
 //! values are circuit wires: each `thash` output feeds the next via
 //! [`crate::thash::thash_digest_bits`].
 
-use crate::thash::{alloc_input_bits, enforce_digest_equals, thash_digest_bits, ADDR_BYTES, SPX_N};
+use crate::thash::{alloc_input_bits, enforce_digest_equals, thash_digest_bits, witness_bytes_from_bits, ADDR_BYTES, SPX_N};
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper_core::{ConstraintSystem, SynthesisError};
 
@@ -115,6 +115,26 @@ where
         j += 1;
     }
     Ok(out)
+}
+
+/// In-circuit `wots_pk_from_sig` using witness root **bits** (FORS pk or prior layer root).
+///
+/// `chain_lengths` are derived from witness assignments via [`witness_bytes_from_bits`]
+/// at synthesis time — no separate `root_in_bytes` oracle parameter.
+pub fn wots_pk_from_sig_root_bits<Scalar, CS>(
+    mut cs: CS,
+    pub_seed: &[u8; SPX_N],
+    addr_base: &[u8; ADDR_BYTES],
+    sig: &[u8; SPX_WOTS_BYTES],
+    root_bits: &[Boolean],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(root_bits.len(), SPX_N * 8);
+    let msg = witness_bytes_from_bits::<SPX_N>(root_bits);
+    wots_pk_from_sig_bits(cs, pub_seed, addr_base, sig, &msg)
 }
 
 /// In-circuit `wots_pk_from_sig`: recover the WOTS+ public key wires (the 35
@@ -225,6 +245,43 @@ mod tests {
 
         let expected = sphincs_ref::wots_pk_from_sig_oracle(&pub_seed, &addr, &sig, &msg);
         assert!(run(&pub_seed, &addr, &sig, &msg, &expected));
+    }
+
+    /// `wots_pk_from_sig_root_bits` agrees with byte-message path when root witness matches.
+    ///
+    /// ```bash
+    /// cargo test -p sphincs-circuit root_bits_path_matches_byte_message --release -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "WOTS recover is slow in debug (~2 min); run --release --ignored"]
+    fn root_bits_path_matches_byte_message() {
+        use bellpepper_core::test_cs::TestConstraintSystem;
+        use blstrs::Scalar as Fr;
+        use crate::thash::alloc_input_bits;
+
+        let pub_seed = [0x77u8; 16];
+        let addr = [0u8; 22];
+        let sig: Vec<u8> = (0..SPX_WOTS_BYTES).map(|i| (i % 200) as u8).collect();
+        let sig: [u8; SPX_WOTS_BYTES] = sig.try_into().unwrap();
+        let msg = [0xabu8; 16];
+        let expected = sphincs_ref::wots_pk_from_sig_oracle(&pub_seed, &addr, &sig, &msg);
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let root_bits = alloc_input_bits(&mut cs, "root", &msg).unwrap();
+        let pk_bits =
+            wots_pk_from_sig_root_bits(&mut cs, &pub_seed, &addr, &sig, &root_bits).unwrap();
+        for chunk in 0..SPX_WOTS_LEN {
+            let mut expected_chunk = [0u8; SPX_N];
+            expected_chunk.copy_from_slice(&expected[chunk * SPX_N..(chunk + 1) * SPX_N]);
+            let bits = &pk_bits[chunk * SPX_N * 8..(chunk + 1) * SPX_N * 8];
+            enforce_digest_equals(
+                cs.namespace(|| format!("pk_eq_{chunk}")),
+                bits,
+                &expected_chunk,
+            )
+            .unwrap();
+        }
+        assert!(cs.is_satisfied());
     }
 
     #[test]

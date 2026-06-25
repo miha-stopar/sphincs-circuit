@@ -228,9 +228,8 @@ Bit-accurate SHA-256 compression step, `thash`, `compute_root`, WOTS+, FORS, hyp
 | **Placeholder core** | `FoldCoreCircuit` is ~1 SHA block for shape equalization only; proves nothing about SPHINCS+ | Used in `fold_packed_chain`, bench |
 | **NeutronNova batch size** | Instance count padded to power of two; duplicating the last step can break **bound** chains | `pad_steps_to_power_of_two`, `longest_chain_bound` |
 | **Single step instance** | `num_steps = 1` has caused prover panics in past tests | Use ≥ 2 instances (see packed chain test) |
-| **Full verify gadget in prover** | `synthesize_verify_core` in `sphincs-circuit`; **`FoldVerifyCoreCircuit`** ports it incrementally (`hash_message` first) | Phase 2 in progress |
-| **Oracle / intermediate_roots** | `intermediate_roots` + `root_in_bytes` fix WOTS `chain_lengths` topology at synthesis; witness roots tied via `enforce_bits_equal_bytes` — see [CIRCUIT.md](CIRCUIT.md) §Synthesis-time hints | `hypertree.rs`, `verify.rs` |
-| **`hm_expected` removed (Phase 2c)** | ✅ `mhash`/`tree`/`leaf_idx` from constrained `mgf_bits` at synthesis; no separate oracle field on `FoldVerifyCoreCircuit` | `hash_msg.rs`, `verify.rs`, `verify_core.rs` |
+| **Full verify gadget in prover** | `synthesize_verify_core` in `sphincs-circuit`; **`FoldVerifyCoreCircuit`** ports it incrementally | Phase 2b/2c — see [VERIFY_CORE.md](VERIFY_CORE.md) |
+| **`intermediate_roots` removed** | ✅ WOTS topology from chained witness `root_bits` (`witness_bytes_from_bits`) | `hypertree.rs`, `wots.rs`, `verify.rs` |
 
 **Honest status of “we have a zk fold” today:** we can prove π for real PQClean compression rows **and** a separate core, but π does **not** yet imply a full sound SPHINCS+ verify unless you use the **packed** path for the chain fragment or fix **Option A/B**.
 

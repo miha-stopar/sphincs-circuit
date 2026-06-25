@@ -16,7 +16,7 @@
 //! |-------|-------------|------------------------------|------|
 //! | **2a** | [`FoldVerifyCoreCircuit::hash_message`] | `hash_message` + link checks only | `fold_verify_core_hash_message` (CI) |
 //! | **2b** | [`FoldVerifyCoreCircuit::full`] | Full [`synthesize_verify_core`] | `fold_verify_core_full_*` (`#[ignore]`, release) |
-//! | **2c** | [`FoldVerifyCoreCircuit::full`] (no `hm_expected`) | `mhash`/`tree`/`leaf` from witness `mgf_bits`; public IO TBD | `parsed_output_matches_native`, `wrong_hm_mgf_*` (CI) |
+//! | **2c** | [`FoldVerifyCoreCircuit::with_public_io`] | `public_values` = `(mlen, PK, M)` — 1033 scalars; fixed `mlen` per instance | `fold_verify_core_hash_message_public_io` (CI) |
 //!
 //! # SpartanCircuit layout
 //!
@@ -24,7 +24,7 @@
 //! shared()       → link_digests[k] as field elements (must match FoldStepBoundCircuit)
 //! precommitted() → phase gadget + enforce_bytes_eq_shared per link + inputize core_x
 //! synthesize()   → (empty — constraints live in precommitted, like FoldStepCircuit)
-//! public_values()→ [0] placeholder until Phase 2c
+//! public_values()→ [0] placeholder, or 1033 scalars when [`FoldVerifyCoreCircuit::public_io`]
 //! ```
 //!
 //! # Message / padding
@@ -35,10 +35,9 @@
 //! - `mlen` is a **synthesis-time constant** on the struct (fixed per proof instance). Variable
 //!   public `mlen` is Phase 2c — see `docs/HACKMD_NEUTRONNOVA_PLAN.md` §Phase 2.
 //!
-//! # Phase Full — remaining witness hints
+//! # Phase Full — witness hints
 //!
-//! [`VerifyCorePhase::Full`] still needs `intermediate_roots` at synthesis time (WOTS topology).
-//! `mhash` / `tree` / `leaf_idx` are derived in-circuit from `hm_mgf` — not a separate field.
+//! No `hm_expected` or `intermediate_roots` fields. WOTS topology follows chained `root_bits`.
 
 use std::marker::PhantomData;
 
@@ -48,8 +47,8 @@ use ff::Field;
 use spartan2::traits::{circuit::SpartanCircuit, Engine};
 use sphincs_circuit::{
     alloc_digest_shared, enforce_bytes_eq_shared, enforce_message_padding, link_shared_slice,
+    inputize_verify_public, pack_verify_public, enforce_public_matches_statement,
     synthesize_hash_message, synthesize_verify_core, hash_msg::SPX_DGST_BYTES, thash::SPX_N,
-    verify::SPX_D,
 };
 
 use crate::fold::E;
@@ -119,10 +118,11 @@ pub struct FoldVerifyCoreCircuit {
     pub hm_mgf: [u8; SPX_DGST_BYTES],
     /// Full verify only: complete signature.
     pub signature: Option<[u8; SPHINCS_SIG_BYTES]>,
-    /// Full verify only: hypertree layer roots (trusted synthesis hint for WOTS topology).
-    pub intermediate_roots: Option<[[u8; SPX_N]; SPX_D]>,
     /// `link_digests[k]` = expected bytes at boundary between step `k` and `k+1` on the trace.
     pub link_digests: Vec<[u8; 32]>,
+    /// When true, expose `(mlen, PK, M_padded)` via Spartan `public_values` + `inputize`.
+    /// See `sphincs_circuit::verify_public_io` and `docs/VERIFY_CORE.md` §Public Spartan IO.
+    pub public_io: bool,
     _p: PhantomData<Scalar>,
 }
 
@@ -145,17 +145,30 @@ impl FoldVerifyCoreCircuit {
             r,
             hm_mgf,
             signature: None,
-            intermediate_roots: None,
             link_digests,
+            public_io: false,
             _p: PhantomData,
         }
     }
 
+    /// Enable public Spartan IO: verifier sees `(mlen, PK, M_padded)` per [DECISIONS.md](../../docs/DECISIONS.md).
+    ///
+    /// `mlen` is still fixed at circuit-build time for `hash_message` SHA length; the public scalar
+    /// is constrained to match. Variable public `mlen` in one universal circuit is a later step.
+    ///
+    /// # Testing
+    ///
+    /// ```bash
+    /// cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_message_public_io
+    /// ```
+    pub fn with_public_io(mut self) -> Self {
+        self.public_io = true;
+        self
+    }
+
     /// Phase 2b/2c: full [`synthesize_verify_core`] inside `C_core`.
     ///
-    /// **Phase 2c:** no `hm_expected` field — `mhash`/`tree`/`leaf_idx` are parsed inside the
-    /// gadget from witness `mgf_bits` constrained to `hm_mgf`. Only `intermediate_roots` remains
-    /// a trusted synthesis hint (WOTS topology).
+    /// **Phase 2c:** no `hm_expected`; WOTS topology from chained witness roots (no `intermediate_roots`).
     ///
     /// Prefer [`super::verify_witness::fold_verify_core_from_pqclean`] for PQClean KATs.
     ///
@@ -172,7 +185,6 @@ impl FoldVerifyCoreCircuit {
         signature: [u8; SPHINCS_SIG_BYTES],
         r: [u8; SPX_N],
         hm_mgf: [u8; SPX_DGST_BYTES],
-        intermediate_roots: [[u8; SPX_N]; SPX_D],
         link_digests: Vec<[u8; 32]>,
     ) -> Self {
         assert!(mlen <= MESSAGE_MAX_BYTES);
@@ -184,8 +196,8 @@ impl FoldVerifyCoreCircuit {
             r,
             hm_mgf,
             signature: Some(signature),
-            intermediate_roots: Some(intermediate_roots),
             link_digests,
+            public_io: false,
             _p: PhantomData,
         }
     }
@@ -217,9 +229,13 @@ where
 
 impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
     fn public_values(&self) -> Result<Vec<Scalar>, SynthesisError> {
-        // Phase 2c will return packed PK || M || mlen. Until then: placeholder matching
-        // FoldStepBoundCircuit / FoldCoreBoundCircuit (Spartan2 requires ≥1 inputized column).
-        Ok(vec![Scalar::ZERO])
+        if self.public_io {
+            Ok(pack_verify_public(&self.pk, &self.message, self.mlen))
+        } else {
+            // Placeholder matching FoldStepBoundCircuit / FoldCoreBoundCircuit
+            // (Spartan2 requires ≥1 inputized column via dummy `core_x`).
+            Ok(vec![Scalar::ZERO])
+        }
     }
 
     fn shared<CS: ConstraintSystem<Scalar>>(
@@ -261,10 +277,6 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                     .signature
                     .as_ref()
                     .ok_or(SynthesisError::AssignmentMissing)?;
-                let intermediate_roots = self
-                    .intermediate_roots
-                    .as_ref()
-                    .ok_or(SynthesisError::AssignmentMissing)?;
 
                 synthesize_verify_core(
                     cs.namespace(|| "verify_core"),
@@ -273,7 +285,6 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                     self.mlen,
                     signature,
                     &self.hm_mgf,
-                    intermediate_roots,
                 )?;
 
                 enforce_core_shared_links(
@@ -284,9 +295,21 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
             }
         }
 
-        // Spartan2 requires at least one inputized witness column in precommitted.
-        let x = AllocatedNum::alloc(cs.namespace(|| "core_x"), || Ok(Scalar::ZERO))?;
-        x.inputize(cs.namespace(|| "inputize core_x"))?;
+        if self.public_io {
+            let public = self.public_values()?;
+            let input = inputize_verify_public(cs.namespace(|| "public_io"), &public)?;
+            enforce_public_matches_statement(
+                cs.namespace(|| "public_stmt"),
+                &input,
+                &self.pk,
+                &self.message,
+                self.mlen,
+            )?;
+        } else {
+            // Spartan2 requires at least one inputized witness column in precommitted.
+            let x = AllocatedNum::alloc(cs.namespace(|| "core_x"), || Ok(Scalar::ZERO))?;
+            x.inputize(cs.namespace(|| "inputize core_x"))?;
+        }
         Ok(vec![])
     }
 

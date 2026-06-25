@@ -24,7 +24,7 @@
 //! |-------|------|
 //! | 2a | `hash_message` + shared link checks — `fold_verify_core_hash_message` (CI) |
 //! | 2b | Full FORS + hypertree + root — `fold_verify_core_full` (`#[ignore]`) |
-//! | 2c | No `hm_expected`; parse from `hm_mgf` witness — `parsed_output_matches_native` (CI) |
+//! | 2c | No `hm_expected`; public `(mlen, PK, M)` via `with_public_io` | `fold_verify_core_hash_message_public_io` (CI) |
 //!
 //! Witness builder (feature `pqclean`): [`fold_verify_core_from_pqclean`].
 //!
@@ -44,6 +44,8 @@ pub use bound::{
 };
 pub use core::{FoldCoreChainCircuit, FoldCoreCircuit};
 pub use verify_core::{FoldVerifyCoreCircuit, VerifyCorePhase, message_bytes, padded_message, sig_r};
+pub use circuit_spec::VERIFY_PUBLIC_NUM_SCALARS;
+pub use sphincs_circuit::pack_verify_public;
 #[cfg(feature = "pqclean")]
 pub use verify_witness::{fold_verify_core_from_pqclean, intermediate_roots_oracle};
 pub use fold::{

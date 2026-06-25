@@ -6,13 +6,14 @@
 //!   2. `thash(leaf, wots_pk, SPX_WOTS_LEN=35, …)` — hash pk to a Merkle leaf.
 //!   3. `compute_root(root, leaf, idx_leaf, 0, auth, SPX_TREE_HEIGHT=9, …)`.
 //!
-//! This module wires those three gadgets together so the 560-byte WOTS pk flows
-//! into the leaf hash, whose output flows into the Merkle walk, returning the
-//! next subtree root as circuit wires.
+//! **WOTS topology:** `chain_lengths` are computed from witness root bits at synthesis
+//! ([`crate::thash::witness_bytes_from_bits`]) — no separate `root_in_bytes` / `intermediate_roots`
+//! hint parameter. Max-unroll in-circuit `chain_lengths` (topology independent of witness root)
+//! remains future work — see `docs/CIRCUIT.md`.
 
 use crate::merkle::compute_root_bits;
 use crate::thash::{enforce_digest_equals, thash_digest_bits, ADDR_BYTES, SPX_N};
-use crate::wots::{wots_pk_from_sig_bits, SPX_WOTS_BYTES};
+use crate::wots::{wots_pk_from_sig_root_bits, SPX_WOTS_BYTES};
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper_core::{ConstraintSystem, SynthesisError};
 
@@ -31,17 +32,11 @@ fn addr_with_type(base: &[u8; ADDR_BYTES], ty: u8) -> [u8; ADDR_BYTES] {
     a
 }
 
-/// In-circuit one hypertree layer: `root_in` → WOTS recover → leaf thash → Merkle
-/// walk → `root_out` wires.
+/// In-circuit one hypertree layer: `root_in_bits` → WOTS recover → leaf thash → Merkle walk.
 ///
-/// `root_in_bytes` supplies the 16-byte message for WOTS `chain_lengths` (fixed at
-/// synthesis time). When composing layers, pass the previous layer's output bits
-/// as `root_in_bits` and enforce they match `root_in_bytes`.
-///
-/// **Trusted-hint caveat:** `chain_lengths(root_in_bytes)` fixes how many `gen_chain`
-/// steps are synthesized; witness `root_in_bits` is tied to those bytes via
-/// `enforce_bits_equal_bytes`. Production should derive lengths from witness or
-/// max-unroll — see `docs/CIRCUIT.md` §Synthesis-time hints.
+/// `root_in_bits` must be the 128-bit digest wires from the previous stage (FORS pk on layer 0,
+/// prior layer output otherwise). WOTS [`chain_lengths`](crate::wots::chain_lengths) follow the
+/// witness root bytes read from those bits at synthesis time.
 #[allow(clippy::too_many_arguments)]
 pub fn hypertree_layer_from_root_bits<Scalar, CS>(
     mut cs: CS,
@@ -51,7 +46,6 @@ pub fn hypertree_layer_from_root_bits<Scalar, CS>(
     tree_addr: &[u8; ADDR_BYTES],
     sig_wots: &[u8; SPX_WOTS_BYTES],
     root_in_bits: &[Boolean],
-    root_in_bytes: &[u8; SPX_N],
     idx_leaf: u32,
     auth_path: &[u8],
 ) -> Result<Vec<Boolean>, SynthesisError>
@@ -59,16 +53,12 @@ where
     Scalar: ff::PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    use crate::thash::enforce_bits_equal_bytes;
-
-    enforce_bits_equal_bytes(cs.namespace(|| "root_in"), root_in_bits, root_in_bytes)?;
-
-    let wots_pk_bits = wots_pk_from_sig_bits(
+    let wots_pk_bits = wots_pk_from_sig_root_bits(
         cs.namespace(|| "wots"),
         pub_seed,
         wots_addr,
         sig_wots,
-        root_in_bytes,
+        root_in_bits,
     )?;
 
     let leaf_addr = addr_with_type(wots_pk_addr, SPX_ADDR_TYPE_WOTSPK);
@@ -119,7 +109,6 @@ where
         tree_addr,
         sig_wots,
         &root_bits,
-        root_in,
         idx_leaf,
         auth_path,
     )

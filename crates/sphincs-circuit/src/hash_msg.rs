@@ -90,8 +90,7 @@ fn bytes_to_ull(b: &[u8]) -> u64 {
 /// and runs this function. FORS/hypertree **address bytes** still use the resulting `u64`/`u32` as
 /// synthesis-time constants (optional future: wire tree/leaf bits into address gadgets).
 ///
-/// **Witness prep:** `sphincs-prover::fold_verify_core_from_pqclean` uses this on native `hm_mgf` for
-/// `intermediate_roots_oracle` replay only — not a separate circuit input.
+/// **Witness prep:** used only by debug [`intermediate_roots_oracle`] in `sphincs-prover` — not a circuit input.
 ///
 /// # Testing
 ///

@@ -20,10 +20,16 @@
 //!
 //! # Run commands
 //!
+//! See **`docs/VERIFY_CORE_TESTS.md`** §Tier D. Minimum shape check:
+//!
 //! ```bash
 //! # Shape check (minimum recommended before touching Full)
 //! cargo test -p sphincs-prover --features pqclean --release \
 //!   --test fold_verify_core_full fold_verify_core_full_setup -- --ignored --nocapture
+//!
+//! # Full core + public_io setup
+//! cargo test -p sphincs-prover --features pqclean --release \
+//!   --test fold_verify_core_full fold_verify_core_full_public_io_setup -- --ignored --nocapture
 //!
 //! # Full suite (slow)
 //! cargo test -p sphincs-prover --features pqclean --release \

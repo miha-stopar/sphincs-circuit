@@ -1,10 +1,15 @@
 //! Phase 2c: [`FoldVerifyCoreCircuit::with_public_io`] — Spartan public `(mlen, PK, M)`.
 //!
+//! # What this test does
+//!
+//! Same as Phase 2a (`fold_verify_core_hash_message`) but `C_core` exposes **1033 public scalars**
+//! (`VERIFY_PUBLIC_NUM_SCALARS`) and `hash_message` SHA preimage is wired from those public `PK` / `M`
+//! columns (not witness-only bytes). End-to-end NeutronNova prove + verify.
+//!
 //! # Background
 //!
 //! Variant A ([DECISIONS.md](../../docs/DECISIONS.md)): public `PK`, padded `M`, `mlen`; private `σ`
-//! and trace. This test checks NeutronNova prove/verify when `C_core` exposes 1033 public scalars
-//! instead of the dummy `[0]` placeholder.
+//! and trace.
 //!
 //! Encoding: `sphincs_circuit::verify_public_io` / `docs/VERIFY_CORE.md` §Public Spartan IO.
 //!
@@ -13,6 +18,8 @@
 //! ```bash
 //! cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_message_public_io
 //! ```
+//!
+//! **Full test guide:** `docs/VERIFY_CORE_TESTS.md`.
 
 #![cfg(feature = "pqclean")]
 

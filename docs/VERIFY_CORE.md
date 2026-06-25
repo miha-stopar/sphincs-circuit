@@ -9,6 +9,7 @@ This document describes **Phase 2** of porting the M2 verify gadgets (`sphincs-c
 - **Done:** Removed separate `hm_expected` from `FoldVerifyCoreCircuit` / `synthesize_verify_core`. Parsed fields come from witness `mgf_bits` enforced against `hm_mgf` ([`synthesize_hash_message_parsed`](../crates/sphincs-circuit/src/hash_msg.rs)).
 - **Done (step 1):** Public Spartan IO for fixed `(PK, M, mlen)` per circuit — [`with_public_io`](../crates/sphincs-prover/src/verify_core.rs), encoding in [`verify_public_io.rs`](../crates/sphincs-circuit/src/verify_public_io.rs), test `fold_verify_core_hash_message_public_io`.
 - **Done (step 1b):** `hash_message` SHA preimage wired from public `PK` / `M` columns when `public_io` — [`hash_message_bits_from_public`](../crates/sphincs-circuit/src/hash_msg.rs), [`synthesize_hash_message_parsed_public`](../crates/sphincs-circuit/src/hash_msg.rs).
+- **Done (step 1c):** Full phase uses [`synthesize_verify_core_public`](../crates/sphincs-circuit/src/verify.rs) when `public_io` (same public preimage wiring through entire verify path).
 - **Done (step 2):** WOTS topology from chained `root_bits` via [`witness_bytes_from_bits`](../crates/sphincs-circuit/src/thash.rs) — no `intermediate_roots` field on `FoldVerifyCoreCircuit`.
 - **Remaining:** Variable public `mlen` in one universal circuit; optional in-circuit tree/leaf bit mux; max-unroll WOTS `chain_lengths`.
 
@@ -32,10 +33,10 @@ Implementation: [`verify_public_io.rs`](../crates/sphincs-circuit/src/verify_pub
 public scalar must equal that constant. One universal circuit accepting runtime `mlen` needs muxed
 preimage (later step).
 
-**Tests:**
+**Tests:** see [VERIFY_CORE_TESTS.md](VERIFY_CORE_TESTS.md) §Quick start and §Phase 2c.
 
 ```bash
-cargo test -p sphincs-circuit verify_public_io::
+cargo test -p sphincs-circuit verify_public_io
 cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_message_public_io
 ```
 
@@ -147,34 +148,34 @@ The prover does **not** derive all hints inside the R1CS yet. [`verify_witness.r
 
 ## Tests
 
+**Full guide (commands, tiers, what each test checks):** [VERIFY_CORE_TESTS.md](VERIFY_CORE_TESTS.md)
+
+### CI default (run after verify-core changes)
+
+```bash
+cargo test -p sphincs-circuit verify_public_io && \
+cargo test -p sphincs-circuit hash_message_public && \
+cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_message && \
+cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_message_public_io
+```
+
+### Summary table
+
 | Test file | Test | What it checks | Default CI |
 |-----------|------|----------------|------------|
 | `hash_msg::tests::parsed_output_matches_native` | — | Phase 2c: `synthesize_hash_message_parsed` + `parse_mgf_output` agree with PQClean | ✅ runs |
 | `hash_msg::tests::hash_message_public_preimage_matches_native` | — | SHA preimage wired from public IO columns | ✅ runs |
 | `verify::tests::wrong_hm_mgf_unsatisfies_parsed_hash_message` | — | Corrupt `hm_mgf` breaks `mgf_bits == hm_mgf` | ✅ runs |
+| `verify::tests::valid_signature_satisfies_core_public` | — | Full core + public-wired `hash_message` on PQClean KAT | `#[ignore]` release |
 | [`fold_verify_core_hash_message.rs`](../crates/sphincs-prover/tests/fold_verify_core_hash_message.rs) | `smoke`, `plain_steps` | Phase 2a end-to-end prove/verify | ✅ runs |
 | [`fold_verify_core_hash_message_public_io.rs`](../crates/sphincs-prover/tests/fold_verify_core_hash_message_public_io.rs) | `smoke` | Phase 2c public IO (1033 scalars) | ✅ runs |
 | [`fold_verify_core_full.rs`](../crates/sphincs-prover/tests/fold_verify_core_full.rs) | `full_setup` | Phase 2b `NeutronNovaZkSNARK::setup` (R1CS shape + equalize) | `#[ignore]` (~7 min release) |
+| | `full_public_io_setup` | Full core + `public_io` setup / equalize | `#[ignore]` release |
 | | `full_prep_prove` | Witness generation for full core | `#[ignore]` |
 | | `full_smoke` | Full prove + verify with bound steps | `#[ignore]` |
 | | `full_plain_steps` | Full core + plain steps (no shared) | `#[ignore]` |
 
-**Run full tests manually:**
-
-```bash
-# Minimum sanity (shape synthesis, ~7 min release)
-cargo test -p sphincs-prover --features pqclean --release \
-  --test fold_verify_core_full fold_verify_core_full_setup -- --ignored --nocapture
-
-# Full prove/verify (much slower — not routinely run)
-cargo test -p sphincs-prover --features pqclean --release \
-  --test fold_verify_core_full -- --ignored --nocapture
-
-# Optional: control bound-step count (power of two, default 4)
-FOLD_VERIFY_CORE_STEPS=8 cargo test ... 
-```
-
-**Local R1CS only** (no NeutronNova): `sphincs-circuit` test `verify::tests::valid_signature_satisfies_core` — also `#[ignore]`, run `--release --ignored`.
+**Slow tests:** see [VERIFY_CORE_TESTS.md](VERIFY_CORE_TESTS.md) §Tier C–D for exact `--release --ignored` commands.
 
 ---
 
@@ -199,3 +200,4 @@ FOLD_VERIFY_CORE_STEPS=8 cargo test ...
 | `crates/sphincs-prover/tests/fold_verify_core_hash_message.rs` | Phase 2a NeutronNova tests |
 | `crates/sphincs-prover/tests/fold_verify_core_hash_message_public_io.rs` | Phase 2c public IO NeutronNova test |
 | `crates/sphincs-prover/tests/fold_verify_core_full.rs` | Phase 2b NeutronNova tests |
+| `docs/VERIFY_CORE_TESTS.md` | **Test guide** — commands, tiers, per-test descriptions |

@@ -25,9 +25,13 @@
 //! in [`crate::hypertree::hypertree_layer_from_root_bits`] — no `intermediate_roots` oracle.
 
 use crate::fors::{fors_pk_from_sig_bits, SPX_FORS_BYTES};
-use crate::hash_msg::{synthesize_hash_message_parsed, SPX_DGST_BYTES, SPX_PK_BYTES};
+use crate::hash_msg::{
+    synthesize_hash_message_parsed, synthesize_hash_message_parsed_public, HashMessageOutput,
+    SPX_DGST_BYTES, SPX_PK_BYTES,
+};
 use crate::hypertree::{hypertree_layer_from_root_bits, SPX_TREE_AUTH_BYTES, SPX_TREE_HEIGHT};
 use crate::thash::{enforce_bits_equal_bytes, ADDR_BYTES, SPX_N};
+use crate::verify_public_io::InputizedVerifyPublic;
 use crate::wots::SPX_WOTS_BYTES;
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper_core::{ConstraintSystem, SynthesisError};
@@ -156,6 +160,80 @@ where
     assert!(mlen <= message.len());
     enforce_message_padding(&mut cs, message, mlen)?;
 
+    let r = {
+        let mut a = [0u8; SPX_N];
+        a.copy_from_slice(&signature[..SIG_R_BYTES]);
+        a
+    };
+    let mut pk32 = [0u8; SPX_PK_BYTES];
+    pk32.copy_from_slice(pk);
+
+    let hm = synthesize_hash_message_parsed(
+        cs.namespace(|| "hash_message"),
+        &r,
+        &pk32,
+        message,
+        mlen,
+        hm_mgf,
+    )?;
+
+    synthesize_verify_core_tail(cs.namespace(|| "verify_tail"), pk, signature, &hm)
+}
+
+/// Full verify core with `hash_message` preimage wired from public Spartan `PK` / `M` columns.
+///
+/// Used when [`sphincs_prover::FoldVerifyCoreCircuit::public_io`] and [`VerifyCorePhase::Full`].
+///
+/// # Testing
+///
+/// ```bash
+/// cargo test -p sphincs-circuit valid_signature_satisfies_core_public --release -- --ignored
+/// ```
+#[allow(clippy::too_many_arguments)]
+pub fn synthesize_verify_core_public<Scalar, CS>(
+    mut cs: CS,
+    public: &InputizedVerifyPublic<Scalar>,
+    pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8; MESSAGE_MAX_BYTES],
+    mlen: usize,
+    signature: &[u8; SPHINCS_SIG_BYTES],
+    hm_mgf: &[u8; SPX_DGST_BYTES],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    enforce_message_padding(&mut cs, message, mlen)?;
+
+    let r = {
+        let mut a = [0u8; SPX_N];
+        a.copy_from_slice(&signature[..SIG_R_BYTES]);
+        a
+    };
+
+    let hm = synthesize_hash_message_parsed_public(
+        cs.namespace(|| "hash_message"),
+        &r,
+        public,
+        pk,
+        message,
+        mlen,
+        hm_mgf,
+    )?;
+
+    synthesize_verify_core_tail(cs.namespace(|| "verify_tail"), pk, signature, &hm)
+}
+
+fn synthesize_verify_core_tail<Scalar, CS>(
+    mut cs: CS,
+    pk: &[u8; SPHINCS_PK_BYTES],
+    signature: &[u8; SPHINCS_SIG_BYTES],
+    hm: &HashMessageOutput,
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
     let pub_seed = {
         let mut s = [0u8; SPX_N];
         s.copy_from_slice(&pk[..SPX_N]);
@@ -166,24 +244,6 @@ where
         r.copy_from_slice(&pk[SPX_N..]);
         r
     };
-
-    let r = {
-        let mut a = [0u8; SPX_N];
-        a.copy_from_slice(&signature[..SIG_R_BYTES]);
-        a
-    };
-    let mut pk32 = [0u8; SPX_PK_BYTES];
-    pk32.copy_from_slice(pk);
-
-    // 1. hash_message — derive mhash / tree / leaf_idx from witness mgf_bits (no hm_expected param).
-    let hm = synthesize_hash_message_parsed(
-        cs.namespace(|| "hash_message"),
-        &r,
-        &pk32,
-        message,
-        mlen,
-        hm_mgf,
-    )?;
 
     let mut tree = hm.tree;
     let mut idx_leaf = hm.leaf_idx;
@@ -317,6 +377,48 @@ mod tests {
         let mut cs = TestConstraintSystem::<Fr>::new();
         synthesize_verify_core(
             &mut cs,
+            &pk,
+            &padded,
+            msg.len(),
+            &sig,
+            &hm_mgf,
+        )
+        .expect("synth");
+        assert!(cs.is_satisfied());
+    }
+
+    /// Full verify core with public-wired `hash_message` preimage (slow).
+    ///
+    /// ```bash
+    /// cargo test -p sphincs-circuit valid_signature_satisfies_core_public --release -- --ignored
+    /// ```
+    #[test]
+    #[ignore = "full verify core public_io is slow; run with --release --ignored"]
+    fn valid_signature_satisfies_core_public() {
+        use circuit_spec::VerifyPublic;
+        use crate::verify_public_io::{inputize_verify_public, pack_verify_public};
+
+        let seed = [0xabu8; CRYPTO_SEEDBYTES];
+        let msg = b"sphincs verify core public io test";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+
+        let r = {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&sig[..16]);
+            a
+        };
+        let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, msg.len());
+
+        let mut padded = [0u8; MESSAGE_MAX_BYTES];
+        padded[..msg.len()].copy_from_slice(msg);
+        let stmt = VerifyPublic::from_message(pk, msg);
+        let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        synthesize_verify_core_public(
+            &mut cs,
+            &input,
             &pk,
             &padded,
             msg.len(),

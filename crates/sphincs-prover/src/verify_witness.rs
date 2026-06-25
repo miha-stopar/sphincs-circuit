@@ -16,6 +16,8 @@
 //!
 //! # Testing
 //!
+//! See **`docs/VERIFY_CORE_TESTS.md`** (quick start + full tier guide).
+//!
 //! ```bash
 //! cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_message
 //! cargo test -p sphincs-prover --features pqclean --release --test fold_verify_core_full \

@@ -54,7 +54,8 @@ pub use thash::{
     thash_preimage, witness_bytes_from_bits, ThashStats,
 };
 pub use verify::{
-    enforce_message_padding, enforce_message_padding_witness, synthesize_verify_core, SPX_D,
+    enforce_message_padding, enforce_message_padding_witness, synthesize_verify_core,
+    synthesize_verify_core_public, SPX_D,
     SIG_AFTER_FORS, SIG_R_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
 };
 pub use verify_public_io::{

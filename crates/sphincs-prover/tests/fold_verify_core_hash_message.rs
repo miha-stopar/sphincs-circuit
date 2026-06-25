@@ -1,7 +1,21 @@
 //! Phase 2a NeutronNova tests: [`VerifyCorePhase::HashMessage`] in `C_core`.
 //!
-//! Phase 2b/2c (full verify, no `hm_expected`) lives in `fold_verify_core_full.rs`.
-//! Design: `docs/VERIFY_CORE.md`.
+//! # What these tests do
+//!
+//! - **`smoke`**: PQClean sign → trace → 4 bound folded steps + `C_core` that only runs
+//!   `hash_message` + shared link checks → NeutronNova prove + verify.
+//! - **`plain_steps`**: Same core with plain steps (no shared link digests) — isolates core gadget size.
+//!
+//! Phase 2b/2c (full verify) lives in `fold_verify_core_full.rs`. Public IO variant:
+//! `fold_verify_core_hash_message_public_io.rs`.
+//!
+//! # Run
+//!
+//! ```bash
+//! cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_message
+//! ```
+//!
+//! **Full test guide:** `docs/VERIFY_CORE_TESTS.md` · Design: `docs/VERIFY_CORE.md`.
 
 #![cfg(feature = "pqclean")]
 

@@ -30,8 +30,8 @@ pub use fors::{
 /// `hash_message` gadgets and Phase 2c parse helpers (`parse_mgf_output`, `synthesize_hash_message_parsed`).
 pub use hash_msg::{
     hash_message_mgf_buf, hash_message_native, hash_message_output_from_mgf_bits,
-    parse_mgf_output, synthesize_hash_message, synthesize_hash_message_parsed, HashMessageOutput,
-    SPX_DGST_BYTES,
+    parse_mgf_output, synthesize_hash_message, synthesize_hash_message_parsed,
+    synthesize_hash_message_parsed_public, HashMessageOutput, SPX_DGST_BYTES,
 };
 pub use hypertree::{
     hypertree_layer_bits, hypertree_layer_from_root_bits, synthesize_hypertree_layer,
@@ -59,7 +59,7 @@ pub use verify::{
 };
 pub use verify_public_io::{
     enforce_public_inactive_chunks_zero, enforce_public_matches_statement, inputize_verify_public,
-    pack_verify_public, InputizedVerifyPublic,
+    pack_verify_public, public_message_sha_bits, public_pk_sha_bits, InputizedVerifyPublic,
 };
 pub use witness::{
     local_chain_segments, step_input_from_row, trace_stats, witness_from_compressions,

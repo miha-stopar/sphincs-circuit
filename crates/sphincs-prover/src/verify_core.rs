@@ -48,7 +48,7 @@ use spartan2::traits::{circuit::SpartanCircuit, Engine};
 use sphincs_circuit::{
     alloc_digest_shared, enforce_bytes_eq_shared, enforce_message_padding, link_shared_slice,
     inputize_verify_public, pack_verify_public, enforce_public_matches_statement,
-    enforce_public_inactive_chunks_zero,
+    enforce_public_inactive_chunks_zero, synthesize_hash_message_parsed_public,
     synthesize_hash_message, synthesize_verify_core, hash_msg::SPX_DGST_BYTES, thash::SPX_N,
 };
 
@@ -253,19 +253,50 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
         match self.phase {
             VerifyCorePhase::HashMessage => {
-                enforce_message_padding(
-                    cs.namespace(|| "msg_pad"),
-                    &self.message,
-                    self.mlen,
-                )?;
-                synthesize_hash_message(
-                    cs.namespace(|| "hash_message"),
-                    &self.r,
-                    &self.pk,
-                    &self.message,
-                    self.mlen,
-                    &self.hm_mgf,
-                )?;
+                if self.public_io {
+                    let public = self.public_values()?;
+                    let input = inputize_verify_public(cs.namespace(|| "public_io"), &public)?;
+                    enforce_message_padding(
+                        cs.namespace(|| "msg_pad"),
+                        &self.message,
+                        self.mlen,
+                    )?;
+                    synthesize_hash_message_parsed_public(
+                        cs.namespace(|| "hash_message"),
+                        &self.r,
+                        &input,
+                        &self.pk,
+                        &self.message,
+                        self.mlen,
+                        &self.hm_mgf,
+                    )?;
+                    enforce_public_matches_statement(
+                        cs.namespace(|| "public_stmt"),
+                        &input,
+                        &self.pk,
+                        &self.message,
+                        self.mlen,
+                    )?;
+                    enforce_public_inactive_chunks_zero(
+                        cs.namespace(|| "public_tail"),
+                        &input,
+                        self.mlen,
+                    )?;
+                } else {
+                    enforce_message_padding(
+                        cs.namespace(|| "msg_pad"),
+                        &self.message,
+                        self.mlen,
+                    )?;
+                    synthesize_hash_message(
+                        cs.namespace(|| "hash_message"),
+                        &self.r,
+                        &self.pk,
+                        &self.message,
+                        self.mlen,
+                        &self.hm_mgf,
+                    )?;
+                }
 
                 enforce_core_shared_links(
                     &mut cs.namespace(|| "links"),
@@ -297,20 +328,22 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
         }
 
         if self.public_io {
-            let public = self.public_values()?;
-            let input = inputize_verify_public(cs.namespace(|| "public_io"), &public)?;
-            enforce_public_matches_statement(
-                cs.namespace(|| "public_stmt"),
-                &input,
-                &self.pk,
-                &self.message,
-                self.mlen,
-            )?;
-            enforce_public_inactive_chunks_zero(
-                cs.namespace(|| "public_tail"),
-                &input,
-                self.mlen,
-            )?;
+            if self.phase != VerifyCorePhase::HashMessage {
+                let public = self.public_values()?;
+                let input = inputize_verify_public(cs.namespace(|| "public_io"), &public)?;
+                enforce_public_matches_statement(
+                    cs.namespace(|| "public_stmt"),
+                    &input,
+                    &self.pk,
+                    &self.message,
+                    self.mlen,
+                )?;
+                enforce_public_inactive_chunks_zero(
+                    cs.namespace(|| "public_tail"),
+                    &input,
+                    self.mlen,
+                )?;
+            }
         } else {
             // Spartan2 requires at least one inputized witness column in precommitted.
             let x = AllocatedNum::alloc(cs.namespace(|| "core_x"), || Ok(Scalar::ZERO))?;

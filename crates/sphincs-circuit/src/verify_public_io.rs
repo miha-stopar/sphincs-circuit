@@ -18,8 +18,8 @@
 //! - **Fixed `mlen` per circuit instance** — `mlen` is a public scalar but the `hash_message`
 //!   gadget still uses synthesis-time `mlen` for SHA preimage length. Variable public `mlen` in
 //!   one universal circuit is a later step (muxed preimage).
-//! - Public inputs are **constrained to match** the bytes passed into verify gadgets at setup;
-//!   the verifier learns `(PK, M_padded, mlen)` per [DECISIONS.md](../../docs/DECISIONS.md).
+//! - With `public_io`, [`crate::hash_msg::synthesize_hash_message_parsed_public`] wires the SHA
+//!   preimage from public `pk` / `message` columns (not separate witness bytes).
 //!
 //! # Testing
 //!
@@ -28,6 +28,7 @@
 //! cargo test -p sphincs-prover --features pqclean --test fold_verify_core_hash_message_public_io
 //! ```
 
+use bellpepper::gadgets::boolean::Boolean;
 use bellpepper::gadgets::uint32::UInt32;
 use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use circuit_spec::{
@@ -186,6 +187,66 @@ where
     Ok(())
 }
 
+/// SHA-256 preimage bit order (MSB-first per byte) for one big-endian `u32` limb.
+fn u32_word_sha_bits(word: &UInt32) -> Vec<Boolean> {
+    let le = word.clone().into_bits();
+    (0..32).rev().map(|i| le[i].clone()).collect()
+}
+
+/// Public `pk` columns → 256 SHA preimage bits, tied to `pk_words` and assignment bytes `pk`.
+pub fn public_pk_sha_bits<Scalar, CS>(
+    mut cs: CS,
+    pk_words: &[AllocatedNum<Scalar>; VERIFY_PUBLIC_PK_SCALARS],
+    pk: &[u8; SPHINCS_PK_BYTES],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let words = state_bytes_to_words(pk);
+    let mut bits = Vec::with_capacity(SPHINCS_PK_BYTES * 8);
+    for (i, &w) in words.iter().enumerate() {
+        let word = UInt32::alloc(cs.namespace(|| format!("pk_w{i}")), Some(w))?;
+        enforce_num_eq_u32(
+            cs.namespace(|| format!("pk_eq_{i}")),
+            &pk_words[i],
+            &word,
+        )?;
+        bits.extend(u32_word_sha_bits(&word));
+    }
+    Ok(bits)
+}
+
+/// Public padded `message` columns → `MESSAGE_MAX_BYTES × 8` SHA preimage bits.
+pub fn public_message_sha_bits<Scalar, CS>(
+    mut cs: CS,
+    message_words: &[AllocatedNum<Scalar>],
+    message: &[u8; MESSAGE_MAX_BYTES],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(message_words.len(), VERIFY_PUBLIC_MSG_SCALARS);
+    let mut bits = Vec::with_capacity(MESSAGE_MAX_BYTES * 8);
+    for (chunk_i, chunk) in message.chunks_exact(32).enumerate() {
+        let mut block = [0u8; 32];
+        block.copy_from_slice(chunk);
+        let words = state_bytes_to_words(&block);
+        for (j, &w) in words.iter().enumerate() {
+            let idx = chunk_i * 8 + j;
+            let word = UInt32::alloc(cs.namespace(|| format!("msg_w_{chunk_i}_{j}")), Some(w))?;
+            enforce_num_eq_u32(
+                cs.namespace(|| format!("msg_eq_{chunk_i}_{j}")),
+                &message_words[idx],
+                &word,
+            )?;
+            bits.extend(u32_word_sha_bits(&word));
+        }
+    }
+    Ok(bits)
+}
+
 /// Enforce `message[mlen..MESSAGE_MAX_BYTES] == 0` on **inputized public** message words.
 ///
 /// Works on full 32-byte chunks wholly at or after `mlen` (v1 padded-message policy). The
@@ -300,5 +361,17 @@ mod tests {
         let input = inputize_verify_public(&mut cs, &public).expect("inputize");
         enforce_public_inactive_chunks_zero(&mut cs, &input, stmt.mlen).expect("tail");
         assert!(!cs.is_satisfied());
+    }
+
+    #[test]
+    fn public_pk_sha_bits_matches_native() {
+        let pk = [0x66u8; SPHINCS_PK_BYTES];
+        let stmt = VerifyPublic::from_message(pk, b"");
+        let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        let bits = public_pk_sha_bits(&mut cs, &input.pk_words, &pk).expect("pk bits");
+        assert_eq!(bits.len(), SPHINCS_PK_BYTES * 8);
+        assert!(cs.is_satisfied());
     }
 }

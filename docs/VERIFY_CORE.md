@@ -8,6 +8,7 @@ This document describes **Phase 2** of porting the M2 verify gadgets (`sphincs-c
 
 - **Done:** Removed separate `hm_expected` from `FoldVerifyCoreCircuit` / `synthesize_verify_core`. Parsed fields come from witness `mgf_bits` enforced against `hm_mgf` ([`synthesize_hash_message_parsed`](../crates/sphincs-circuit/src/hash_msg.rs)).
 - **Done (step 1):** Public Spartan IO for fixed `(PK, M, mlen)` per circuit — [`with_public_io`](../crates/sphincs-prover/src/verify_core.rs), encoding in [`verify_public_io.rs`](../crates/sphincs-circuit/src/verify_public_io.rs), test `fold_verify_core_hash_message_public_io`.
+- **Done (step 1b):** `hash_message` SHA preimage wired from public `PK` / `M` columns when `public_io` — [`hash_message_bits_from_public`](../crates/sphincs-circuit/src/hash_msg.rs), [`synthesize_hash_message_parsed_public`](../crates/sphincs-circuit/src/hash_msg.rs).
 - **Done (step 2):** WOTS topology from chained `root_bits` via [`witness_bytes_from_bits`](../crates/sphincs-circuit/src/thash.rs) — no `intermediate_roots` field on `FoldVerifyCoreCircuit`.
 - **Remaining:** Variable public `mlen` in one universal circuit; optional in-circuit tree/leaf bit mux; max-unroll WOTS `chain_lengths`.
 
@@ -25,8 +26,7 @@ When [`FoldVerifyCoreCircuit::public_io`] is true, `public_values()` returns **1
 | `message` | 1024 | 128 × 32-byte chunks, 8 SHA-state words each |
 
 Implementation: [`verify_public_io.rs`](../crates/sphincs-circuit/src/verify_public_io.rs). Each scalar is
-`inputize`d in `precommitted()` and constrained via [`enforce_public_matches_statement`](../crates/sphincs-circuit/src/verify_public_io.rs)
-and [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circuit/src/verify_public_io.rs) (zero tail on public `M` chunks after `mlen`).
+`inputize`d in `precommitted()`. With `public_io` on Phase 2a, [`synthesize_hash_message_parsed_public`](../crates/sphincs-circuit/src/hash_msg.rs) wires the SHA preimage from public `PK` / `M` columns; [`enforce_public_matches_statement`](../crates/sphincs-circuit/src/verify_public_io.rs) and [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circuit/src/verify_public_io.rs) check the full public tuple.
 
 **Limitation:** `mlen` is still a **synthesis-time constant** for `hash_message_bits` SHA length; the
 public scalar must equal that constant. One universal circuit accepting runtime `mlen` needs muxed
@@ -150,6 +150,7 @@ The prover does **not** derive all hints inside the R1CS yet. [`verify_witness.r
 | Test file | Test | What it checks | Default CI |
 |-----------|------|----------------|------------|
 | `hash_msg::tests::parsed_output_matches_native` | — | Phase 2c: `synthesize_hash_message_parsed` + `parse_mgf_output` agree with PQClean | ✅ runs |
+| `hash_msg::tests::hash_message_public_preimage_matches_native` | — | SHA preimage wired from public IO columns | ✅ runs |
 | `verify::tests::wrong_hm_mgf_unsatisfies_parsed_hash_message` | — | Corrupt `hm_mgf` breaks `mgf_bits == hm_mgf` | ✅ runs |
 | [`fold_verify_core_hash_message.rs`](../crates/sphincs-prover/tests/fold_verify_core_hash_message.rs) | `smoke`, `plain_steps` | Phase 2a end-to-end prove/verify | ✅ runs |
 | [`fold_verify_core_hash_message_public_io.rs`](../crates/sphincs-prover/tests/fold_verify_core_hash_message_public_io.rs) | `smoke` | Phase 2c public IO (1033 scalars) | ✅ runs |

@@ -20,6 +20,7 @@
 
 use crate::fors::SPX_FORS_MSG_BYTES;
 use crate::thash::{alloc_input_bits, enforce_bits_equal_bytes, SPX_N};
+use crate::verify_public_io::{public_message_sha_bits, public_pk_sha_bits, InputizedVerifyPublic};
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper::gadgets::sha256::sha256;
 use bellpepper_core::{ConstraintSystem, SynthesisError};
@@ -251,6 +252,71 @@ where
     Ok((mgf_bits, parse_mgf_output(&buf)))
 }
 
+/// In-circuit `hash_message` with `R ‖ PK ‖ M[0..mlen]` wired from **public Spartan columns**.
+///
+/// `pk` / `message` byte buffers supply synthesis-time assignments; R1CS ties
+/// [`InputizedVerifyPublic`] words to those bytes. Used when `FoldVerifyCoreCircuit::public_io`.
+///
+/// `mlen` is still a synthesis-time constant for preimage length (variable public `mlen` is a later step).
+///
+/// # Testing
+///
+/// ```bash
+/// cargo test -p sphincs-circuit hash_message_public_preimage_matches_native
+/// ```
+pub fn hash_message_bits_from_public<Scalar, CS>(
+    mut cs: CS,
+    r: &[u8; SPX_N],
+    public: &InputizedVerifyPublic<Scalar>,
+    pk: &[u8; SPX_PK_BYTES],
+    message: &[u8; MESSAGE_MAX_BYTES],
+    mlen: usize,
+) -> Result<(Vec<Boolean>, HashMessageOutput), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert!(mlen <= MESSAGE_MAX_BYTES);
+
+    let pk_bits = public_pk_sha_bits(cs.namespace(|| "pub_pk"), &public.pk_words, pk)?;
+    let msg_bits = public_message_sha_bits(
+        cs.namespace(|| "pub_msg"),
+        &public.message_words,
+        message,
+    )?;
+
+    let r_bits: Vec<Boolean> = bytes_to_bits_be(r).into_iter().map(Boolean::constant).collect();
+    let mut preimage_bits = r_bits;
+    preimage_bits.extend(pk_bits);
+    preimage_bits.extend(msg_bits.into_iter().take(mlen * 8));
+
+    let seed_hash_bits = sha256(cs.namespace(|| "hm_seed"), &preimage_bits)?;
+
+    let pk_seed_bits: Vec<Boolean> = bytes_to_bits_be(&pk[..SPX_N])
+        .into_iter()
+        .map(Boolean::constant)
+        .collect();
+    let mut seed_bits: Vec<Boolean> = bytes_to_bits_be(r).into_iter().map(Boolean::constant).collect();
+    seed_bits.extend(pk_seed_bits);
+    seed_bits.extend(seed_hash_bits);
+
+    let mgf_bits = mgf1_digest_bits(cs.namespace(|| "mgf1"), &seed_bits, SPX_DGST_BYTES)?;
+
+    let mut buf = [0u8; SPX_DGST_BYTES];
+    for (i, chunk) in buf.iter_mut().enumerate() {
+        let start = i * 8;
+        let mut byte = 0u8;
+        for (j, bit) in mgf_bits[start..start + 8].iter().enumerate() {
+            if bit.get_value().unwrap_or(false) {
+                byte |= 1 << (7 - j);
+            }
+        }
+        *chunk = byte;
+    }
+
+    Ok((mgf_bits, parse_mgf_output(&buf)))
+}
+
 fn bytes_to_bits_be(bytes: &[u8]) -> Vec<bool> {
     let mut bits = Vec::with_capacity(bytes.len() * 8);
     for byte in bytes {
@@ -323,6 +389,26 @@ where
     Ok(hash_message_output_from_mgf_bits(&mgf_bits))
 }
 
+/// Like [`synthesize_hash_message_parsed`] but `PK` / `M` in the SHA preimage come from public IO.
+pub fn synthesize_hash_message_parsed_public<Scalar, CS>(
+    mut cs: CS,
+    r: &[u8; SPX_N],
+    public: &InputizedVerifyPublic<Scalar>,
+    pk: &[u8; SPX_PK_BYTES],
+    message: &[u8; MESSAGE_MAX_BYTES],
+    mlen: usize,
+    expected_mgf: &[u8; SPX_DGST_BYTES],
+) -> Result<HashMessageOutput, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let (mgf_bits, _) =
+        hash_message_bits_from_public(cs.namespace(|| "hm"), r, public, pk, message, mlen)?;
+    enforce_bits_equal_bytes(cs.namespace(|| "mgf_out"), &mgf_bits, expected_mgf)?;
+    Ok(hash_message_output_from_mgf_bits(&mgf_bits))
+}
+
 /// Synthesize `hash_message` and enforce MGF1 output matches `expected_mgf` (30 bytes).
 ///
 /// Thin wrapper around [`synthesize_hash_message_parsed`] that discards the parsed
@@ -348,6 +434,33 @@ mod tests {
     use super::*;
     use bellpepper_core::test_cs::TestConstraintSystem;
     use blstrs::Scalar as Fr;
+    use circuit_spec::VerifyPublic;
+    use crate::verify_public_io::{inputize_verify_public, pack_verify_public};
+
+    #[test]
+    fn hash_message_public_preimage_matches_native() {
+        let r = [0x77u8; 16];
+        let msg = b"public preimage wiring";
+        let pk = [0x88u8; 32];
+        let stmt = VerifyPublic::from_message(pk, msg);
+        let mlen = msg.len();
+        let expected_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+        let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, mlen);
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        synthesize_hash_message_parsed_public(
+            &mut cs,
+            &r,
+            &input,
+            &pk,
+            &stmt.message,
+            mlen,
+            &expected_mgf,
+        )
+        .expect("synth");
+        assert!(cs.is_satisfied());
+    }
 
     #[test]
     fn native_matches_pqclean_short_message() {

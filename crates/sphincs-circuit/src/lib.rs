@@ -11,6 +11,7 @@ pub mod chain;
 pub mod shared_link;
 pub mod fors;
 pub mod hash_msg;
+pub mod hash_message_trace;
 pub mod hypertree;
 pub mod merkle;
 pub mod sha256_compress;
@@ -36,6 +37,12 @@ pub use hash_msg::{
     hash_message_tail_message_bytes, parse_mgf_output, synthesize_hash_message,
     synthesize_hash_message_parsed, synthesize_hash_message_parsed_public, HashMessageOutput,
     HashMessageSeedPath, SPX_DGST_BYTES, HASH_MESSAGE_INBUF_BYTES, HASH_MESSAGE_PREFIX_BYTES,
+};
+pub use hash_message_trace::{
+    hash_message_compression_count_exact, hash_message_mgf1_compression_count,
+    hash_message_seed_compression_count, locate_hash_message_trace_span,
+    locate_hash_message_trace_span_for_mlen, sha256_compression_count_fresh,
+    HashMessageTraceSpan,
 };
 pub use hypertree::{
     hypertree_layer_bits, hypertree_layer_from_root_bits, synthesize_hypertree_layer,

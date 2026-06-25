@@ -97,9 +97,9 @@ pub fn hash_message_tail_message_bytes(mlen: usize) -> usize {
     }
 }
 
-/// Rough compression budget for `hash_message` (seed + MGF1), per [FOLDING.md](../../docs/FOLDING.md).
+/// Rough upper bound for `hash_message` (seed + MGF1), per [FOLDING.md](../../docs/FOLDING.md).
 ///
-/// Exact counts should be confirmed against PQClean instrumentation before trace linking.
+/// Prefer [`crate::hash_message_trace::hash_message_compression_count_exact`] for trace linking.
 pub fn hash_message_compression_budget(mlen: usize) -> usize {
     2 + mlen.div_ceil(64)
 }

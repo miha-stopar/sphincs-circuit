@@ -1,6 +1,6 @@
 # Variable public `mlen` — design notes (Phase 2c+)
 
-**Status:** steps C–D landed; preimage **length** still fixed per `circuit_mlen` instance. Step E (trace alignment) remains.
+**Status:** steps C–D landed; step **E (partial)** — exact compression counts + PQClean trace span location. Preimage **length** still fixed per `circuit_mlen` instance; core↔fold equating not yet wired.
 
 **Related:** [VERIFY_CORE.md](VERIFY_CORE.md) · [FOLDING.md](FOLDING.md) §4.2 · [HACKMD_NEUTRONNOVA_PLAN.md](HACKMD_NEUTRONNOVA_PLAN.md) §Phase 2 `mlen` table
 
@@ -36,13 +36,15 @@ Helpers:
 hash_message_seed_path(mlen)
 hash_message_first_block_message_bytes(mlen)
 hash_message_tail_message_bytes(mlen)
-hash_message_compression_budget(mlen)  // rough: 2 + ⌈mlen/64⌉ — see FOLDING.md
+hash_message_compression_budget(mlen)  // rough upper bound — see FOLDING.md
+hash_message_compression_count_exact(mlen)  // seed + MGF1 — see hash_message_trace.rs
 ```
 
 **Tests:**
 
 ```bash
 cargo test -p sphincs-circuit hash_message_seed_path
+cargo test -p sphincs-circuit hash_message_compression_count_exact
 ```
 
 ---
@@ -97,7 +99,8 @@ Already enforced: [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circ
 | **B** (done) | In-circuit `mlen` range check on public scalar | `enforce_public_mlen_in_range` |
 | **C** (done) | Mux short/long native SHA paths in R1CS (no trace yet) | `hash_message_variable_mlen_matches_native` |
 | **D** (done) | Public `mlen` masks inactive message bytes in SHA preimage + full core test | `valid_signature_satisfies_core_variable_mlen`, `public_message_bits_for_mlen` |
-| **E** | Trace compression count selector | integration with `fold_verify_core_*` |
+| **E** (partial) | Exact compression counts + trace span location | `hash_message_compression_count_exact`, `hash_message_compression_count_exact_matches_pqclean_trace` |
+| **E+** | Equate core in-gadget SHA to folded step outputs | `fold_verify_core_*` integration |
 
 Do **not** block Phase 2b/full-core KATs on step E — fixed-`mlen` instances remain valid deployment mode.
 

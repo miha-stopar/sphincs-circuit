@@ -120,6 +120,54 @@ a muxed / length-driven preimage. Tracked in [VARIABLE_MLEN.md](VARIABLE_MLEN.md
 
 ---
 
+## BUG-5 (critical completeness, FIXED): verify-core hypertree `wots_addr` missing layer
+
+### Symptom
+
+The full verify core (`synthesize_verify_core` and all variants) did **not** reproduce
+`PK.root` for a genuine KAT signature. The first failing constraint was
+`verify_tail/pk_root/bit_eq_1/enforce equal to zero` (the final `root == PK.root` check), at
+constraint index ≈ 49.29M.
+
+### Root cause
+
+In the hypertree loop, `wots_addr` was rebuilt each iteration with `set_type` / `set_tree_addr` /
+`set_keypair_addr` but **without `set_layer_addr(layer)`** (left at layer 0). PQClean derives
+`wots_addr` via `copy_subtree_addr(wots_addr, tree_addr)`, so it inherits the current `layer`.
+For `layer == 0` the circuit was coincidentally correct (so FORS and the bottom hypertree layer
+passed), but layers `1..SPX_D` hashed WOTS with the wrong ADRS, producing a wrong leaf → wrong
+subtree root → wrong final root. `wots_pk_addr` was unaffected because it is derived from
+`tree_addr` (which does set the layer).
+
+### Why it was never caught
+
+All `valid_signature_satisfies_core*` tests were `#[ignore]` and built the circuit in
+`bellpepper_core::test_cs::TestConstraintSystem`, which needs tens of GB for the full core and
+swap-dies before completing — so the bug sat latent. The component gadget tests
+(`wots`, `merkle`, `hypertree`, `fors`) pass because they construct addresses manually, and they
+happened to exercise layer 0 / direct addresses. The NeutronNova `*_full_*_setup` tests only
+check R1CS **shape** (`setup` + equalize), not satisfiability against a real witness.
+
+### Fix
+
+Add `wots_addr = set_layer_addr(&wots_addr, layer as u32);` in the hypertree loop
+(`crates/sphincs-circuit/src/verify.rs`). After the fix the full core is satisfiable for KAT
+signatures:
+
+- `valid_signature_satisfies_core_public` ✅ (~32s)
+- `valid_signature_satisfies_core_trace` ✅ (~35s, also exercises BUG-1's bound seed)
+
+### Tooling that exposed it: `SatCheckCS`
+
+`crates/sphincs-circuit/src/satcheck.rs` is a memory-light `ConstraintSystem` that evaluates each
+`A · B = C` against the running witness and discards the linear combinations, so peak memory is
+`O(num_variables)` instead of `O(num_constraints × lc_size)`. It turns the full-core
+satisfiability check from a multi-hour swap-death into a ~30s run and reports the **index and
+namespace path** of the first failing constraint (how this bug was localized). The
+`valid_signature_satisfies_core*` tests now use it.
+
+---
+
 ## FINDING-4 (documented, not a bug): MGF1 folded rows are metadata only
 
 `trace.mgf1_rows` is intentionally unused by the core. The core derives the MGF1 digest one-shot

@@ -14,6 +14,7 @@ pub mod hash_msg;
 pub mod hash_message_trace;
 pub mod hypertree;
 pub mod merkle;
+pub mod satcheck;
 pub mod sha256_compress;
 pub mod step;
 pub mod thash;

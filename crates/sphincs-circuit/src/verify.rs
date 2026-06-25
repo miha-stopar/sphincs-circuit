@@ -354,8 +354,13 @@ where
 
     // 3. Seven hypertree layers — root_bits chains layer to layer.
     for layer in 0..SPX_D {
+        // PQClean derives `wots_addr` from `tree_addr` via `copy_subtree_addr`, so it carries the
+        // current `layer` (and tree). Setting only tree/keypair here (layer left at 0) silently
+        // corrupts WOTS hashing for layers 1..SPX_D and only surfaces as a `root != PK.root`
+        // mismatch at the very end. Set the layer explicitly to match the reference.
         let mut wots_addr = [0u8; ADDR_BYTES];
         wots_addr = set_type(&wots_addr, SPX_ADDR_TYPE_WOTS);
+        wots_addr = set_layer_addr(&wots_addr, layer as u32);
         wots_addr = set_tree_addr(&wots_addr, tree);
         wots_addr = set_keypair_addr(&wots_addr, idx_leaf);
 
@@ -403,6 +408,7 @@ where
 mod tests {
     use super::*;
     use crate::hash_msg::hash_message_mgf_buf;
+    use crate::satcheck::SatCheckCS;
     use bellpepper_core::test_cs::TestConstraintSystem;
     use blstrs::Scalar as Fr;
     use sphincs_ref::{sign_deterministic, CRYPTO_SEEDBYTES};
@@ -435,13 +441,16 @@ mod tests {
         assert!(!cs.is_satisfied(), "corrupt hm_mgf must break mgf_bits == hm_mgf");
     }
 
-    /// Full M2 verify core R1CS on a PQClean KAT signature (slow).
+    /// Full M2 verify core R1CS on a PQClean KAT signature.
+    ///
+    /// Uses [`SatCheckCS`] (O(vars) memory) so the full multi-million-constraint core actually
+    /// completes (~30s release) instead of swap-dying under `TestConstraintSystem`.
     ///
     /// ```bash
-    /// cargo test -p sphincs-circuit valid_signature_satisfies_core --release -- --ignored --nocapture
+    /// cargo test -p sphincs-circuit valid_signature_satisfies_core --release -- --ignored --nocapture --test-threads=1
     /// ```
     #[test]
-    #[ignore = "full verify core is slow in debug (~hours); run with --release --ignored"]
+    #[ignore = "full verify core ~30s release; run with --release --ignored --test-threads=1"]
     fn valid_signature_satisfies_core() {
         let seed = [9u8; CRYPTO_SEEDBYTES];
         let msg = b"sphincs verify core test";
@@ -457,7 +466,7 @@ mod tests {
         let mut padded = vec![0u8; MESSAGE_MAX_BYTES];
         padded[..msg.len()].copy_from_slice(msg);
 
-        let mut cs = TestConstraintSystem::<Fr>::new();
+        let mut cs = SatCheckCS::<Fr>::new();
         synthesize_verify_core(
             &mut cs,
             &pk,
@@ -467,7 +476,12 @@ mod tests {
             &hm_mgf,
         )
         .expect("synth");
-        assert!(cs.is_satisfied());
+        assert!(
+            cs.is_satisfied(),
+            "unsatisfied #{:?} at {:?}",
+            cs.which_is_unsatisfied(),
+            cs.first_unsatisfied_path()
+        );
     }
 
     /// Full verify core with public-wired `hash_message` preimage (slow).
@@ -497,7 +511,7 @@ mod tests {
         let stmt = VerifyPublic::from_message(pk, msg);
         let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
 
-        let mut cs = TestConstraintSystem::<Fr>::new();
+        let mut cs = SatCheckCS::<Fr>::new();
         let input = inputize_verify_public(&mut cs, &public).expect("inputize");
         synthesize_verify_core_public(
             &mut cs,
@@ -509,7 +523,12 @@ mod tests {
             &hm_mgf,
         )
         .expect("synth");
-        assert!(cs.is_satisfied());
+        assert!(
+            cs.is_satisfied(),
+            "unsatisfied #{:?} at {:?}",
+            cs.which_is_unsatisfied(),
+            cs.first_unsatisfied_path()
+        );
     }
 
     /// Full verify core with trace-linked `hash_message` (slow).
@@ -553,7 +572,7 @@ mod tests {
         let mut padded = vec![0u8; MESSAGE_MAX_BYTES];
         padded[..msg.len()].copy_from_slice(msg);
 
-        let mut cs = TestConstraintSystem::<Fr>::new();
+        let mut cs = SatCheckCS::<Fr>::new();
         synthesize_verify_core_with_trace(
             &mut cs,
             &pk,
@@ -565,7 +584,12 @@ mod tests {
             &[],
         )
         .expect("synth");
-        assert!(cs.is_satisfied());
+        assert!(
+            cs.is_satisfied(),
+            "unsatisfied #{:?} at {:?}",
+            cs.which_is_unsatisfied(),
+            cs.first_unsatisfied_path()
+        );
     }
 
     /// SOUNDNESS regression at the full-core level: trace-linked `hash_message` must be bound to
@@ -608,7 +632,7 @@ mod tests {
         padded[..msg.len()].copy_from_slice(msg);
         padded[0] ^= 0x01;
 
-        let mut cs = TestConstraintSystem::<Fr>::new();
+        let mut cs = SatCheckCS::<Fr>::new();
         let res = synthesize_verify_core_with_trace(
             &mut cs,
             &pk,

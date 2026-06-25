@@ -186,6 +186,47 @@ where
     Ok(())
 }
 
+/// Enforce `message[mlen..MESSAGE_MAX_BYTES] == 0` on **inputized public** message words.
+///
+/// Works on full 32-byte chunks wholly at or after `mlen` (v1 padded-message policy). The
+/// partial final active chunk still relies on [`enforce_public_matches_statement`] tying public
+/// bytes to the honest padded buffer until variable public `mlen` mux lands.
+///
+/// # Testing
+///
+/// ```bash
+/// cargo test -p sphincs-circuit enforce_public_inactive_chunks_zero
+/// ```
+pub fn enforce_public_inactive_chunks_zero<Scalar, CS>(
+    mut cs: CS,
+    input: &InputizedVerifyPublic<Scalar>,
+    mlen: usize,
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert!(mlen <= MESSAGE_MAX_BYTES);
+    let chunks = MESSAGE_MAX_BYTES / 32;
+    let words_per_chunk = VERIFY_PUBLIC_MSG_SCALARS / chunks;
+
+    for chunk in 0..chunks {
+        if chunk * 32 < mlen {
+            continue;
+        }
+        let base = chunk * words_per_chunk;
+        let zero = UInt32::constant(0);
+        for j in 0..words_per_chunk {
+            enforce_num_eq_u32(
+                cs.namespace(|| format!("inactive_zero_{chunk}_{j}")),
+                &input.message_words[base + j],
+                &zero,
+            )?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -236,6 +277,28 @@ mod tests {
             stmt.mlen,
         )
         .expect("enforce");
+        assert!(!cs.is_satisfied());
+    }
+
+    #[test]
+    fn enforce_public_inactive_chunks_zero_accepts_honest_padding() {
+        let stmt = VerifyPublic::from_message([0x44u8; 32], b"tail must be zero on public M");
+        let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        enforce_public_inactive_chunks_zero(&mut cs, &input, stmt.mlen).expect("tail");
+        assert!(cs.is_satisfied());
+    }
+
+    #[test]
+    fn enforce_public_inactive_chunks_zero_rejects_nonzero_tail_chunk() {
+        let mut stmt = VerifyPublic::from_message([0x55u8; 32], b"short");
+        // Corrupt a byte in an inactive full chunk (chunk 1 starts at byte 32; mlen=5).
+        stmt.message[64] = 0x01;
+        let public = pack_verify_public::<Fr>(&stmt.pk, &stmt.message, stmt.mlen);
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let input = inputize_verify_public(&mut cs, &public).expect("inputize");
+        enforce_public_inactive_chunks_zero(&mut cs, &input, stmt.mlen).expect("tail");
         assert!(!cs.is_satisfied());
     }
 }

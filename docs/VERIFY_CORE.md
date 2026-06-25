@@ -25,8 +25,8 @@ When [`FoldVerifyCoreCircuit::public_io`] is true, `public_values()` returns **1
 | `message` | 1024 | 128 × 32-byte chunks, 8 SHA-state words each |
 
 Implementation: [`verify_public_io.rs`](../crates/sphincs-circuit/src/verify_public_io.rs). Each scalar is
-`inputize`d in `precommitted()` and constrained to match the bytes fed into verify gadgets via
-[`enforce_public_matches_statement`](../crates/sphincs-circuit/src/verify_public_io.rs).
+`inputize`d in `precommitted()` and constrained via [`enforce_public_matches_statement`](../crates/sphincs-circuit/src/verify_public_io.rs)
+and [`enforce_public_inactive_chunks_zero`](../crates/sphincs-circuit/src/verify_public_io.rs) (zero tail on public `M` chunks after `mlen`).
 
 **Limitation:** `mlen` is still a **synthesis-time constant** for `hash_message_bits` SHA length; the
 public scalar must equal that constant. One universal circuit accepting runtime `mlen` needs muxed

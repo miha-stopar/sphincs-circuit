@@ -48,6 +48,7 @@ use spartan2::traits::{circuit::SpartanCircuit, Engine};
 use sphincs_circuit::{
     alloc_digest_shared, enforce_bytes_eq_shared, enforce_message_padding, link_shared_slice,
     inputize_verify_public, pack_verify_public, enforce_public_matches_statement,
+    enforce_public_inactive_chunks_zero,
     synthesize_hash_message, synthesize_verify_core, hash_msg::SPX_DGST_BYTES, thash::SPX_N,
 };
 
@@ -303,6 +304,11 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                 &input,
                 &self.pk,
                 &self.message,
+                self.mlen,
+            )?;
+            enforce_public_inactive_chunks_zero(
+                cs.namespace(|| "public_tail"),
+                &input,
                 self.mlen,
             )?;
         } else {

@@ -58,8 +58,8 @@ pub use verify::{
     SIG_AFTER_FORS, SIG_R_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
 };
 pub use verify_public_io::{
-    enforce_public_matches_statement, inputize_verify_public, pack_verify_public,
-    InputizedVerifyPublic,
+    enforce_public_inactive_chunks_zero, enforce_public_matches_statement, inputize_verify_public,
+    pack_verify_public, InputizedVerifyPublic,
 };
 pub use witness::{
     local_chain_segments, step_input_from_row, trace_stats, witness_from_compressions,

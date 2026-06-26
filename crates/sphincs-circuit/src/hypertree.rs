@@ -11,7 +11,7 @@
 //! hint parameter. Max-unroll in-circuit `chain_lengths` (topology independent of witness root)
 //! remains future work — see `docs/CIRCUIT.md`.
 
-use crate::merkle::compute_root_bits;
+use crate::merkle::{compute_root_bits, compute_root_bits_linked};
 use crate::thash::{enforce_digest_equals, thash_digest_bits, ADDR_BYTES, SPX_N};
 use crate::wots::{wots_pk_from_sig_root_bits, wots_pk_from_sig_root_bits_linked, SPX_WOTS_BYTES};
 use bellpepper::gadgets::boolean::Boolean;
@@ -129,6 +129,57 @@ where
         0,
         auth_path,
         SPX_TREE_HEIGHT,
+    )
+}
+
+/// Fully offloaded hypertree layer: **both** the WOTS chains (`wots_bus`, `F`) and
+/// the Merkle `compute_root` levels (`merkle_h_bus`, `H`) are shared-bus links to
+/// folded steps. Only the multi-block WOTS-pk leaf `thash` stays in-core.
+///
+/// `merkle_h_bus` length = `SPX_TREE_HEIGHT · THASH_H_SLOT_LEN`.
+#[allow(clippy::too_many_arguments)]
+pub fn hypertree_layer_from_root_bits_offloaded<Scalar, CS>(
+    mut cs: CS,
+    pub_seed: &[u8; SPX_N],
+    wots_addr: &[u8; ADDR_BYTES],
+    wots_pk_addr: &[u8; ADDR_BYTES],
+    tree_addr: &[u8; ADDR_BYTES],
+    sig_wots: &[u8; SPX_WOTS_BYTES],
+    root_in_bits: &[Boolean],
+    idx_leaf: u32,
+    auth_path: &[u8],
+    wots_bus: &[AllocatedNum<Scalar>],
+    merkle_h_bus: &[AllocatedNum<Scalar>],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let wots_pk_bits = wots_pk_from_sig_root_bits_linked(
+        cs.namespace(|| "wots"),
+        wots_addr,
+        sig_wots,
+        root_in_bits,
+        wots_bus,
+    )?;
+
+    let leaf_addr = addr_with_type(wots_pk_addr, SPX_ADDR_TYPE_WOTSPK);
+    let leaf_bits = thash_digest_bits(
+        cs.namespace(|| "leaf"),
+        pub_seed,
+        &leaf_addr,
+        &wots_pk_bits,
+    )?;
+
+    compute_root_bits_linked(
+        cs.namespace(|| "tree"),
+        tree_addr,
+        &leaf_bits,
+        idx_leaf,
+        0,
+        auth_path,
+        SPX_TREE_HEIGHT,
+        merkle_h_bus,
     )
 }
 

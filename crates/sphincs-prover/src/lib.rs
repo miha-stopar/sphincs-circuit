@@ -56,7 +56,8 @@ pub use fold::{
 };
 pub use packed::FoldPackedChainCircuit;
 pub use thash_fold::{
-    thash_f_chain_fold, FoldThashFCoreCircuit, FoldThashFStepCircuit,
+    thash_f_chain_fold, thash_h_compute_root_fold, FoldThashFCoreCircuit, FoldThashFStepCircuit,
+    FoldThashHCoreCircuit, FoldThashHStepCircuit,
 };
 pub use trace::{
     chain_boundary_links, fold_steps_from_rows, fold_steps_prefix, hash_message_chain_prefix,

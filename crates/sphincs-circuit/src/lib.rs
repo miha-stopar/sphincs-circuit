@@ -51,7 +51,7 @@ pub use hash_message_trace::{
 };
 pub use hypertree::{
     hypertree_layer_bits, hypertree_layer_from_root_bits, hypertree_layer_from_root_bits_linked,
-    synthesize_hypertree_layer, SPX_TREE_HEIGHT,
+    hypertree_layer_from_root_bits_offloaded, synthesize_hypertree_layer, SPX_TREE_HEIGHT,
 };
 pub use merkle::{
     addr_with_height_index, compute_root_bits, compute_root_bits_linked, compute_root_h_bus_values,
@@ -82,9 +82,10 @@ pub use thash_link::{
 };
 pub use verify::{
     enforce_message_padding, enforce_message_padding_witness, synthesize_verify_core,
-    synthesize_verify_core_public, synthesize_verify_core_public_with_trace,
-    synthesize_verify_core_with_trace, synthesize_verify_core_wots_linked,
-    verify_core_wots_bus_len, SPX_D,
+    synthesize_verify_core_offloaded, synthesize_verify_core_public,
+    synthesize_verify_core_public_with_trace, synthesize_verify_core_with_trace,
+    synthesize_verify_core_wots_linked, verify_core_fors_f_bus_len, verify_core_fors_h_bus_len,
+    verify_core_hypertree_h_bus_len, verify_core_wots_bus_len, VerifyCoreBuses, SPX_D,
     SIG_AFTER_FORS, SIG_R_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
 };
 pub use verify_public_io::{

@@ -29,8 +29,25 @@ constraints in one `C_core`" / "trace-link FORS / WOTS / hypertree too").
   - The bus columns hold wide field elements, so the fold uses the general
     commitment path (`fold_and_prove_general`, `is_small = false`) rather than the
     small-scalar path the `u32`-limbed digest bus uses — see the note below.
-- **Next increment:** generalize the bus/step to the other `thash` families (FORS
-  leaf/node, Merkle node, WOTS-pk compression, hypertree).
+- **Done — H family (Merkle / FORS nodes):** the `thash`-H (`inblocks = 2`)
+  function used by every Merkle/FORS node is offloaded with the *same* pattern as
+  F (it is also a single variable compression — see below). `thash_link.rs` exposes
+  `thash_h_*`; `merkle.rs` has `compute_root_bits_linked` + the native walker
+  `compute_root_h_bus_values`; `fors.rs` has `fors_pk_from_sig_bits_linked` (leaf F
+  + node H offloaded, multi-block horizontal pk thash in-core). Validated against
+  the in-core relations by `compute_root_offload_matches_in_core` (merkle),
+  `fors_offload_matches_in_core` (fors), and `h_*` tests (thash_link). The H fold
+  proves+verifies through `spartan2` (`fold_thash_h_compute_root_prove_and_verify`).
+- **Done — full single-block offload in the verify core:**
+  `synthesize_verify_core_offloaded` (in `verify.rs`) threads **four** buses
+  (FORS-F, FORS-H, WOTS-F, Merkle-H) and offloads *every* single-block `thash`.
+  Validated on a real PQClean KAT by `valid_signature_satisfies_core_offloaded`.
+  This covers ~245 of the ~253 remaining compressions; only the **8 multi-block**
+  calls (7 WOTS-pk leaf `thash`es + 1 FORS-pk horizontal `thash`) and
+  `hash_message` stay in-core.
+- **Next increment:** offload the two multi-block families (WOTS-pk `inblocks=35`,
+  FORS-pk `inblocks=14`) by chaining intermediate-state slots, and drive all four
+  buses + the link digests through one `comm_W_shared` in a single fold proof.
 
 ## Why the existing trace-linking did not offload anything
 
@@ -103,6 +120,33 @@ Performs **no** compression. It:
 Together these close the BUG-1 class for the offloaded compression. The four
 `rejects_*` tests in `thash_link.rs` exercise each binding.
 
+## The `thash`-H structure (`inblocks = 2`) — Merkle / FORS nodes
+
+```text
+thash_H(in0, in1, addr) = SHA256( pub_seed(16) ‖ 0^48 ‖ addr(22) ‖ in0(16) ‖ in1(16) )[0:16]
+```
+
+The variable region `addr(22) ‖ in0(16) ‖ in1(16)` is 54 bytes; with SHA padding
+(`0x80`, then the 8-byte length at offset 56) it **still fits one 64-byte block**.
+So — exactly like F — `thash`-H is a *single* variable compression
+`Compress(S, block1)`, and it reuses the same `C_step` / `C_core` split. The only
+differences are the slot width and the pad/length constants:
+
+| slot   | width   | meaning                                      |
+|--------|---------|----------------------------------------------|
+| `addr` | 176-bit | big-endian value of the 22-byte address      |
+| `in0`  | 128-bit | first 16-byte child node                      |
+| `in1`  | 128-bit | second 16-byte child node                     |
+| `out`  | 128-bit | 16-byte parent node                           |
+
+The 32-byte input is split into two 128-bit halves (one column each) so every
+committed value stays `< 2^176`, comfortably inside the scalar field. `C_core`'s
+`compute_root_bits_linked` binds `in0`/`in1` to the `left`/`right` upstream wires of
+each Merkle level and returns the bus `out` as the parent — no compression in-core.
+
+The same primitives serve **both** consumers of `compute_root`: FORS trees
+(`tree_height = 12`) and hypertree subtrees (`tree_height = 9`).
+
 ## How the SatCheckCS tests model the fold
 
 In the real fold, `C_step` (many folded instances of one shape) and `C_core` (one
@@ -142,15 +186,24 @@ witness and fails verification with `InvalidPCS { "… First equation failed" }`
 | `thash_f_step_values(...)` | compute step `addr/in/out` bits without binding (for muxed fold steps) |
 | `thash_f_core_link(...)` | `C_core` glue for one call |
 | `gen_chain_linked(...)` | trace-linked replacement for `wots::gen_chain` |
+| `thash_h_block / thash_h_out` | native H references |
+| `ThashHBusValue` / `alloc_thash_h_slot / alloc_thash_h_bus` | H bus entry + allocation |
+| `thash_h_step / thash_h_step_values / thash_h_core_link` | H folded step / glue (`THASH_H_SLOT_LEN = 4`) |
 
-WOTS layer / verify-core helpers:
+WOTS / FORS / Merkle / verify-core helpers:
 
 | item | crate · role |
 |------|--------------|
 | `wots::wots_pk_from_sig_bits_linked` / `_root_bits_linked` | `sphincs-circuit` · WOTS pk recovery over a bus |
 | `wots::wots_pk_bus_values` / `wots_step_count` | `sphincs-circuit` · native bus builder / bus sizing |
-| `verify::synthesize_verify_core_wots_linked` | `sphincs-circuit` · full verify core with WOTS offloaded |
+| `merkle::compute_root_bits_linked` / `compute_root_h_bus_values` | `sphincs-circuit` · Merkle walk over an H bus / native walker |
+| `fors::fors_pk_from_sig_bits_linked` / `fors_pk_bus_values` | `sphincs-circuit` · FORS pk over F+H buses / native builder |
+| `hypertree::hypertree_layer_from_root_bits_offloaded` | `sphincs-circuit` · one layer with WOTS-F + Merkle-H offloaded |
+| `verify::synthesize_verify_core_wots_linked` | `sphincs-circuit` · verify core with WOTS offloaded |
+| `verify::synthesize_verify_core_offloaded` + `VerifyCoreBuses` | `sphincs-circuit` · verify core with **all** single-block families offloaded |
+| `verify::verify_core_{wots,fors_f,fors_h,hypertree_h}_bus_len` | `sphincs-circuit` · bus sizing helpers |
 | `thash_fold::{FoldThashFStepCircuit, FoldThashFCoreCircuit, thash_f_chain_fold}` | `sphincs-prover` · NeutronNova fold of a WOTS chain |
+| `thash_fold::{FoldThashHStepCircuit, FoldThashHCoreCircuit, thash_h_compute_root_fold}` | `sphincs-prover` · NeutronNova fold of a Merkle `compute_root` |
 | `fold::fold_and_prove_general` | `sphincs-prover` · prove with the general (wide-column) commitment path |
 
 ## Roadmap to fully shrink `C_core`
@@ -163,11 +216,17 @@ WOTS layer / verify-core helpers:
    Remaining: drive the bus from a full PQClean verify trace and fold all 7 layers'
    steps + the full `synthesize_verify_core_wots_linked` core in one proof (extend
    `comm_W_shared` to carry the `link_digests` *and* the `thash`-F bus together).
-3. **Other families.** Generalize the bus to multi-block `thash`es:
-   - FORS leaf `F` and Merkle node `H` (`inblocks = 1` / `2` → 2 compressions),
-   - FORS root and WOTS-pk compression (`inblocks = 14` / `35` → 5 / 11
-     compressions: share the chain of intermediate states, keep only the first
-     constant `S` boundary fixed),
-   - hypertree Merkle layers (same `H` as above).
-   The `in`/`out` slot widths stay 128-bit; multi-block calls add intermediate
-   state-boundary slots (reuse `shared_link`'s `8×u32` digest slots for those).
+3. ~~**Single-block families** (FORS leaf `F`, Merkle/FORS node `H`, hypertree
+   Merkle layers).~~ **Done** — both `inblocks ∈ {1, 2}` are single variable
+   compressions, offloaded via the F and H buses and composed in
+   `synthesize_verify_core_offloaded`.
+4. **Multi-block families** (FORS-pk `inblocks = 14` → 5 compressions, WOTS-pk
+   `inblocks = 35` → 11 compressions). These span several blocks, so they need a
+   *chain* of compression steps that share intermediate SHA-256 state boundaries:
+   pin only the first constant `S`, then carry each block's `h_out` to the next
+   block's `h_in` over the bus. The `in`/`out` slot widths stay 128-bit; the
+   intermediate boundaries can reuse `shared_link`'s `8×u32` digest slots. Only 8
+   such calls remain per signature.
+5. **One proof.** Drive all four single-block buses + the multi-block boundaries +
+   the `link_digests` through one `comm_W_shared` so the entire verify core folds in
+   a single NeutronNova proof.

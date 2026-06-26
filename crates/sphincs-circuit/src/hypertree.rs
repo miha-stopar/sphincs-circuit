@@ -13,9 +13,9 @@
 
 use crate::merkle::compute_root_bits;
 use crate::thash::{enforce_digest_equals, thash_digest_bits, ADDR_BYTES, SPX_N};
-use crate::wots::{wots_pk_from_sig_root_bits, SPX_WOTS_BYTES};
+use crate::wots::{wots_pk_from_sig_root_bits, wots_pk_from_sig_root_bits_linked, SPX_WOTS_BYTES};
 use bellpepper::gadgets::boolean::Boolean;
-use bellpepper_core::{ConstraintSystem, SynthesisError};
+use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 
 /// Hypertree Merkle height (`SPX_TREE_HEIGHT`).
 pub const SPX_TREE_HEIGHT: u32 = 9;
@@ -59,6 +59,57 @@ where
         wots_addr,
         sig_wots,
         root_in_bits,
+    )?;
+
+    let leaf_addr = addr_with_type(wots_pk_addr, SPX_ADDR_TYPE_WOTSPK);
+    let leaf_bits = thash_digest_bits(
+        cs.namespace(|| "leaf"),
+        pub_seed,
+        &leaf_addr,
+        &wots_pk_bits,
+    )?;
+
+    compute_root_bits(
+        cs.namespace(|| "tree"),
+        pub_seed,
+        tree_addr,
+        &leaf_bits,
+        idx_leaf,
+        0,
+        auth_path,
+        SPX_TREE_HEIGHT,
+    )
+}
+
+/// Trace-linked [`hypertree_layer_from_root_bits`]: the WOTS chain `thash`-F steps
+/// are offloaded to `wots_bus` (folded steps), while the leaf `thash` and Merkle
+/// `compute_root` remain in-core (those families are offloaded in a later increment).
+///
+/// `wots_bus` must be sized for this layer's WOTS recovery
+/// (`THASH_F_SLOT_LEN * wots_step_count(witness root)`).
+#[allow(clippy::too_many_arguments)]
+pub fn hypertree_layer_from_root_bits_linked<Scalar, CS>(
+    mut cs: CS,
+    pub_seed: &[u8; SPX_N],
+    wots_addr: &[u8; ADDR_BYTES],
+    wots_pk_addr: &[u8; ADDR_BYTES],
+    tree_addr: &[u8; ADDR_BYTES],
+    sig_wots: &[u8; SPX_WOTS_BYTES],
+    root_in_bits: &[Boolean],
+    idx_leaf: u32,
+    auth_path: &[u8],
+    wots_bus: &[AllocatedNum<Scalar>],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let wots_pk_bits = wots_pk_from_sig_root_bits_linked(
+        cs.namespace(|| "wots"),
+        wots_addr,
+        sig_wots,
+        root_in_bits,
+        wots_bus,
     )?;
 
     let leaf_addr = addr_with_type(wots_pk_addr, SPX_ADDR_TYPE_WOTSPK);

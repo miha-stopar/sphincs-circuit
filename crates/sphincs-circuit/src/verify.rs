@@ -30,10 +30,14 @@ use crate::hash_msg::{
     synthesize_hash_message_parsed, synthesize_hash_message_parsed_public, HashMessageOutput,
     SPX_DGST_BYTES, SPX_PK_BYTES,
 };
-use crate::hypertree::{hypertree_layer_from_root_bits, SPX_TREE_AUTH_BYTES, SPX_TREE_HEIGHT};
-use crate::thash::{enforce_bits_equal_bytes, ADDR_BYTES, SPX_N};
+use crate::hypertree::{
+    hypertree_layer_from_root_bits, hypertree_layer_from_root_bits_linked, SPX_TREE_AUTH_BYTES,
+    SPX_TREE_HEIGHT,
+};
+use crate::thash::{enforce_bits_equal_bytes, witness_bytes_from_bits, ADDR_BYTES, SPX_N};
+use crate::thash_link::THASH_F_SLOT_LEN;
 use crate::verify_public_io::InputizedVerifyPublic;
-use crate::wots::SPX_WOTS_BYTES;
+use crate::wots::{wots_step_count, SPX_WOTS_BYTES};
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use circuit_spec::{MESSAGE_MAX_BYTES, SPHINCS_PK_BYTES, SPHINCS_SIG_BYTES};
@@ -404,6 +408,172 @@ where
     Ok(())
 }
 
+/// Total offloaded WOTS `thash`-F slots across all 7 hypertree layers, for sizing
+/// the `wots_bus` of [`synthesize_verify_core_tail_linked`].
+///
+/// `layer_roots[i]` is the 16-byte signed message of layer `i` (FORS pk for layer
+/// 0, the previous layer's recovered root otherwise) — exactly the values the
+/// circuit reads from `root_bits` at synthesis time.
+pub fn verify_core_wots_bus_len(layer_roots: &[[u8; SPX_N]; SPX_D]) -> usize {
+    layer_roots.iter().map(wots_step_count).sum::<usize>() * THASH_F_SLOT_LEN
+}
+
+/// Trace-linked variant of `synthesize_verify_core_tail`: the WOTS chain `thash`-F
+/// steps of every hypertree layer are offloaded to `wots_bus` (folded steps),
+/// while FORS, the leaf `thash`, the Merkle walk, and the final root check stay
+/// in-core (those families are offloaded in later increments).
+///
+/// `wots_bus` length must equal `verify_core_wots_bus_len(layer_roots)` where
+/// `layer_roots` are the per-layer signed messages (see that fn). It is consumed
+/// layer-by-layer, sized from the witness `root_bits` of each layer.
+fn synthesize_verify_core_tail_linked<Scalar, CS>(
+    mut cs: CS,
+    pk: &[u8; SPHINCS_PK_BYTES],
+    signature: &[u8; SPHINCS_SIG_BYTES],
+    hm: &HashMessageOutput,
+    wots_bus: &[AllocatedNum<Scalar>],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let pub_seed = {
+        let mut s = [0u8; SPX_N];
+        s.copy_from_slice(&pk[..SPX_N]);
+        s
+    };
+    let pk_root = {
+        let mut r = [0u8; SPX_N];
+        r.copy_from_slice(&pk[SPX_N..]);
+        r
+    };
+
+    let mut tree = hm.tree;
+    let mut idx_leaf = hm.leaf_idx;
+
+    let mut fors_addr = [0u8; ADDR_BYTES];
+    fors_addr = set_type(&fors_addr, SPX_ADDR_TYPE_WOTS);
+    fors_addr = set_tree_addr(&fors_addr, tree);
+    fors_addr = set_keypair_addr(&fors_addr, idx_leaf);
+
+    let mut fors_sig = [0u8; SPX_FORS_BYTES];
+    fors_sig.copy_from_slice(&signature[SIG_R_BYTES..SIG_AFTER_FORS]);
+
+    let mhash = hm.mhash;
+
+    let fors_pk_bits = fors_pk_from_sig_bits(
+        cs.namespace(|| "fors"),
+        &pub_seed,
+        &fors_addr,
+        &fors_sig,
+        &mhash,
+    )?;
+    let mut root_bits = fors_pk_bits;
+    let mut sig_off = SIG_AFTER_FORS;
+    let mut bus_cursor = 0usize;
+
+    for layer in 0..SPX_D {
+        let mut wots_addr = [0u8; ADDR_BYTES];
+        wots_addr = set_type(&wots_addr, SPX_ADDR_TYPE_WOTS);
+        wots_addr = set_layer_addr(&wots_addr, layer as u32);
+        wots_addr = set_tree_addr(&wots_addr, tree);
+        wots_addr = set_keypair_addr(&wots_addr, idx_leaf);
+
+        let mut tree_addr = [0u8; ADDR_BYTES];
+        tree_addr = set_type(&tree_addr, SPX_ADDR_TYPE_HASHTREE);
+        tree_addr = set_layer_addr(&tree_addr, layer as u32);
+        tree_addr = set_tree_addr(&tree_addr, tree);
+
+        let wots_pk_addr = {
+            let mut a = copy_subtree_addr(&tree_addr);
+            a = set_keypair_addr(&a, idx_leaf);
+            set_type(&a, SPX_ADDR_TYPE_WOTSPK)
+        };
+
+        let mut sig_wots = [0u8; SPX_WOTS_BYTES];
+        sig_wots.copy_from_slice(&signature[sig_off..sig_off + SPX_WOTS_BYTES]);
+        sig_off += SPX_WOTS_BYTES;
+
+        let auth = &signature[sig_off..sig_off + SPX_TREE_AUTH_BYTES];
+        sig_off += SPX_TREE_AUTH_BYTES;
+
+        // Size this layer's bus segment from the witness root bytes (same topology
+        // source as the in-core WOTS path).
+        let layer_msg = witness_bytes_from_bits::<SPX_N>(&root_bits);
+        let layer_slots = wots_step_count(&layer_msg) * THASH_F_SLOT_LEN;
+        let layer_bus = &wots_bus[bus_cursor..bus_cursor + layer_slots];
+        bus_cursor += layer_slots;
+
+        root_bits = hypertree_layer_from_root_bits_linked(
+            cs.namespace(|| format!("layer_{layer}")),
+            &pub_seed,
+            &wots_addr,
+            &wots_pk_addr,
+            &tree_addr,
+            &sig_wots,
+            &root_bits,
+            idx_leaf,
+            auth,
+            layer_bus,
+        )?;
+
+        idx_leaf = (tree & ((1u64 << SPX_TREE_HEIGHT) - 1)) as u32;
+        tree >>= SPX_TREE_HEIGHT;
+    }
+
+    enforce_bits_equal_bytes(cs.namespace(|| "pk_root"), &root_bits, &pk_root)?;
+    Ok(())
+}
+
+/// Trace-linked [`synthesize_verify_core`]: identical relation, but every WOTS+
+/// chain `thash`-F is a shared-bus link to a folded `C_step` instead of an in-core
+/// SHA-256. `hash_message`, FORS, the leaf `thash`, and the Merkle walk stay
+/// in-core for now (offloaded in later increments).
+///
+/// `wots_bus` is sized by [`verify_core_wots_bus_len`].
+#[allow(clippy::too_many_arguments)]
+pub fn synthesize_verify_core_wots_linked<Scalar, CS>(
+    mut cs: CS,
+    pk: &[u8; SPHINCS_PK_BYTES],
+    message: &[u8],
+    mlen: usize,
+    signature: &[u8; SPHINCS_SIG_BYTES],
+    hm_mgf: &[u8; SPX_DGST_BYTES],
+    wots_bus: &[AllocatedNum<Scalar>],
+) -> Result<(), SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert!(mlen <= message.len());
+    enforce_message_padding(&mut cs, message, mlen)?;
+
+    let r = {
+        let mut a = [0u8; SPX_N];
+        a.copy_from_slice(&signature[..SIG_R_BYTES]);
+        a
+    };
+    let mut pk32 = [0u8; SPX_PK_BYTES];
+    pk32.copy_from_slice(pk);
+
+    let hm = synthesize_hash_message_parsed(
+        cs.namespace(|| "hash_message"),
+        &r,
+        &pk32,
+        message,
+        mlen,
+        hm_mgf,
+    )?;
+
+    synthesize_verify_core_tail_linked(
+        cs.namespace(|| "verify_tail"),
+        pk,
+        signature,
+        &hm,
+        wots_bus,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,6 +649,128 @@ mod tests {
         assert!(
             cs.is_satisfied(),
             "unsatisfied #{:?} at {:?}",
+            cs.which_is_unsatisfied(),
+            cs.first_unsatisfied_path()
+        );
+    }
+
+    /// Full verify core with the WOTS chain `thash`-F steps offloaded to folded
+    /// `C_step` instances over a shared bus. The joint system (linked core + all
+    /// folded steps) must be satisfiable on a real PQClean signature — proving the
+    /// cross-layer bus wiring agrees with the in-core relation.
+    ///
+    /// ```bash
+    /// cargo test -p sphincs-circuit valid_signature_satisfies_core_wots_linked --release -- --ignored --nocapture --test-threads=1
+    /// ```
+    #[test]
+    #[ignore = "full linked verify core ~30s release; run with --release --ignored --test-threads=1"]
+    fn valid_signature_satisfies_core_wots_linked() {
+        use crate::thash_link::{alloc_thash_f_bus, seeded_state, thash_f_step, ThashFBusValue};
+        use crate::wots::wots_pk_bus_values;
+        use sphincs_ref::{
+            compute_root_oracle, fors_pk_from_sig_oracle, hash_message_oracle, thash_oracle,
+            wots_pk_from_sig_oracle,
+        };
+
+        let seed = [9u8; CRYPTO_SEEDBYTES];
+        let msg = b"sphincs verify core wots-linked test";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+
+        let r = {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(&sig[..16]);
+            a
+        };
+        let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, msg.len());
+        let mut padded = vec![0u8; MESSAGE_MAX_BYTES];
+        padded[..msg.len()].copy_from_slice(msg);
+        let pub_seed: [u8; SPX_N] = pk[..SPX_N].try_into().unwrap();
+
+        // ---- native walk (via oracles) to build the per-layer WOTS bus values ----
+        let hm = hash_message_oracle(&r, &pk, msg, msg.len());
+        let mut tree = hm.tree;
+        let mut idx_leaf = hm.leaf_idx;
+
+        let mut fors_addr = [0u8; ADDR_BYTES];
+        fors_addr = set_type(&fors_addr, SPX_ADDR_TYPE_WOTS);
+        fors_addr = set_tree_addr(&fors_addr, tree);
+        fors_addr = set_keypair_addr(&fors_addr, idx_leaf);
+        let mut fors_sig = [0u8; SPX_FORS_BYTES];
+        fors_sig.copy_from_slice(&sig[SIG_R_BYTES..SIG_AFTER_FORS]);
+        let mut root = fors_pk_from_sig_oracle(&pub_seed, &fors_addr, &fors_sig, &hm.mhash);
+
+        let mut sig_off = SIG_AFTER_FORS;
+        let mut values: Vec<ThashFBusValue> = Vec::new();
+        for layer in 0..SPX_D {
+            let mut wots_addr = [0u8; ADDR_BYTES];
+            wots_addr = set_type(&wots_addr, SPX_ADDR_TYPE_WOTS);
+            wots_addr = set_layer_addr(&wots_addr, layer as u32);
+            wots_addr = set_tree_addr(&wots_addr, tree);
+            wots_addr = set_keypair_addr(&wots_addr, idx_leaf);
+
+            let mut tree_addr = [0u8; ADDR_BYTES];
+            tree_addr = set_type(&tree_addr, SPX_ADDR_TYPE_HASHTREE);
+            tree_addr = set_layer_addr(&tree_addr, layer as u32);
+            tree_addr = set_tree_addr(&tree_addr, tree);
+
+            let wots_pk_addr = {
+                let mut a = copy_subtree_addr(&tree_addr);
+                a = set_keypair_addr(&a, idx_leaf);
+                set_type(&a, SPX_ADDR_TYPE_WOTSPK)
+            };
+
+            let mut sig_wots = [0u8; SPX_WOTS_BYTES];
+            sig_wots.copy_from_slice(&sig[sig_off..sig_off + SPX_WOTS_BYTES]);
+            sig_off += SPX_WOTS_BYTES;
+            let auth = &sig[sig_off..sig_off + SPX_TREE_AUTH_BYTES];
+            sig_off += SPX_TREE_AUTH_BYTES;
+
+            values.extend(wots_pk_bus_values(&pub_seed, &wots_addr, &sig_wots, &root));
+
+            // Advance the chained root for the next layer via oracles.
+            let wots_pk = wots_pk_from_sig_oracle(&pub_seed, &wots_addr, &sig_wots, &root);
+            let leaf = thash_oracle(&pub_seed, &wots_pk_addr, &wots_pk);
+            root = compute_root_oracle(
+                &pub_seed,
+                &tree_addr,
+                &leaf,
+                idx_leaf,
+                0,
+                auth,
+                SPX_TREE_HEIGHT,
+            );
+            idx_leaf = (tree & ((1u64 << SPX_TREE_HEIGHT) - 1)) as u32;
+            tree >>= SPX_TREE_HEIGHT;
+        }
+
+        // ---- joint circuit: linked core glue + all folded steps over one bus ----
+        let seeded = seeded_state(&pub_seed);
+        let mut cs = SatCheckCS::<Fr>::new();
+        let bus = alloc_thash_f_bus(cs.namespace(|| "bus"), &values).unwrap();
+        synthesize_verify_core_wots_linked(
+            &mut cs,
+            &pk,
+            &padded,
+            msg.len(),
+            &sig,
+            &hm_mgf,
+            &bus,
+        )
+        .expect("synth");
+        for (k, v) in values.iter().enumerate() {
+            let slot = &bus[k * THASH_F_SLOT_LEN..(k + 1) * THASH_F_SLOT_LEN];
+            thash_f_step(
+                cs.namespace(|| format!("step_{k}")),
+                &seeded,
+                &v.addr,
+                &v.input,
+                slot,
+            )
+            .unwrap();
+        }
+        assert!(
+            cs.is_satisfied(),
+            "linked core unsatisfied #{:?} at {:?}",
             cs.which_is_unsatisfied(),
             cs.first_unsatisfied_path()
         );

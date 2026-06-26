@@ -49,8 +49,8 @@ pub use hash_message_trace::{
     HashMessageTraceInputs, HashMessageTraceSpan,
 };
 pub use hypertree::{
-    hypertree_layer_bits, hypertree_layer_from_root_bits, synthesize_hypertree_layer,
-    SPX_TREE_HEIGHT,
+    hypertree_layer_bits, hypertree_layer_from_root_bits, hypertree_layer_from_root_bits_linked,
+    synthesize_hypertree_layer, SPX_TREE_HEIGHT,
 };
 pub use merkle::{compute_root_bits, synthesize_compute_root};
 pub use shared_link::{
@@ -76,7 +76,8 @@ pub use thash_link::{
 pub use verify::{
     enforce_message_padding, enforce_message_padding_witness, synthesize_verify_core,
     synthesize_verify_core_public, synthesize_verify_core_public_with_trace,
-    synthesize_verify_core_with_trace, SPX_D,
+    synthesize_verify_core_with_trace, synthesize_verify_core_wots_linked,
+    verify_core_wots_bus_len, SPX_D,
     SIG_AFTER_FORS, SIG_R_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
 };
 pub use verify_public_io::{
@@ -92,6 +93,7 @@ pub use witness::{
     LocalChain, TraceStats,
 };
 pub use wots::{
-    chain_lengths, gen_chain, synthesize_wots_pk_from_sig, wots_pk_from_sig_bits,
-    wots_pk_from_sig_root_bits, SPX_WOTS_BYTES, SPX_WOTS_LEN,
+    chain_lengths, gen_chain, synthesize_wots_pk_from_sig, wots_pk_bus_values,
+    wots_pk_from_sig_bits, wots_pk_from_sig_bits_linked, wots_pk_from_sig_root_bits,
+    wots_pk_from_sig_root_bits_linked, wots_step_count, SPX_WOTS_BYTES, SPX_WOTS_LEN,
 };

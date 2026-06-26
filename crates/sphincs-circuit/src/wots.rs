@@ -16,8 +16,11 @@
 //! [`crate::thash::thash_digest_bits`].
 
 use crate::thash::{alloc_input_bits, enforce_digest_equals, thash_digest_bits, witness_bytes_from_bits, ADDR_BYTES, SPX_N};
+use crate::thash_link::{
+    gen_chain_linked, thash_f_chain_bus_values, ThashFBusValue, THASH_F_SLOT_LEN,
+};
 use bellpepper::gadgets::boolean::Boolean;
-use bellpepper_core::{ConstraintSystem, SynthesisError};
+use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 
 /// Winternitz parameter `w`.
 pub const SPX_WOTS_W: u32 = 16;
@@ -173,6 +176,99 @@ where
     Ok(pk_bits)
 }
 
+/// Number of offloaded `thash`-F steps a `wots_pk_from_sig` over `msg` executes
+/// (= `Σ_i (w-1 - len_i)`). This is the bus length, in slots, for one WOTS layer.
+pub fn wots_step_count(msg: &[u8; SPX_N]) -> usize {
+    chain_lengths(msg)
+        .iter()
+        .map(|&len| (SPX_WOTS_W - 1 - len) as usize)
+        .sum()
+}
+
+/// Native bus values for a full `wots_pk_from_sig`, in **chain-then-step** order
+/// (matches [`wots_pk_from_sig_bits_linked`]'s consumption order). Pure (no PQClean).
+pub fn wots_pk_bus_values(
+    pub_seed: &[u8; SPX_N],
+    addr_base: &[u8; ADDR_BYTES],
+    sig: &[u8; SPX_WOTS_BYTES],
+    msg: &[u8; SPX_N],
+) -> Vec<ThashFBusValue> {
+    let lengths = chain_lengths(msg);
+    let mut values = Vec::with_capacity(wots_step_count(msg));
+    for (i, &len) in lengths.iter().enumerate() {
+        let addr = addr_with_chain(addr_base, i as u32);
+        let mut chain_in = [0u8; SPX_N];
+        chain_in.copy_from_slice(&sig[i * SPX_N..(i + 1) * SPX_N]);
+        let (vals, _top) =
+            thash_f_chain_bus_values(pub_seed, &addr, &chain_in, len, SPX_WOTS_W - 1 - len);
+        values.extend(vals);
+    }
+    values
+}
+
+/// Trace-linked [`wots_pk_from_sig_bits`]: every chain `thash`-F is a bus link to a
+/// folded step instead of an in-core SHA-256.
+///
+/// `bus` holds `THASH_F_SLOT_LEN` field elements per executed step, in chain-then
+/// step order (length = `THASH_F_SLOT_LEN * wots_step_count(msg)`). No `pub_seed`
+/// is needed: `C_core` performs no compression.
+pub fn wots_pk_from_sig_bits_linked<Scalar, CS>(
+    mut cs: CS,
+    addr_base: &[u8; ADDR_BYTES],
+    sig: &[u8; SPX_WOTS_BYTES],
+    msg: &[u8; SPX_N],
+    bus: &[AllocatedNum<Scalar>],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(bus.len(), wots_step_count(msg) * THASH_F_SLOT_LEN);
+    let lengths = chain_lengths(msg);
+    let mut pk_bits = Vec::with_capacity(SPX_WOTS_BYTES * 8);
+    let mut cursor = 0usize;
+
+    for (i, &len) in lengths.iter().enumerate() {
+        let chain_in = alloc_input_bits(
+            &mut cs.namespace(|| format!("sig_{i}")),
+            "v",
+            &sig[i * SPX_N..(i + 1) * SPX_N],
+        )?;
+        let addr = addr_with_chain(addr_base, i as u32);
+        let steps = (SPX_WOTS_W - 1 - len) as usize;
+        let seg = &bus[cursor * THASH_F_SLOT_LEN..(cursor + steps) * THASH_F_SLOT_LEN];
+        cursor += steps;
+        let top = gen_chain_linked(
+            cs.namespace(|| format!("chain_{i}")),
+            &addr,
+            &chain_in,
+            len,
+            SPX_WOTS_W - 1 - len,
+            seg,
+        )?;
+        pk_bits.extend(top);
+    }
+    Ok(pk_bits)
+}
+
+/// Trace-linked [`wots_pk_from_sig_root_bits`]: WOTS topology follows the witness
+/// root bits; chain `thash`-F steps are offloaded to the `bus`.
+pub fn wots_pk_from_sig_root_bits_linked<Scalar, CS>(
+    cs: CS,
+    addr_base: &[u8; ADDR_BYTES],
+    sig: &[u8; SPX_WOTS_BYTES],
+    root_bits: &[Boolean],
+    bus: &[AllocatedNum<Scalar>],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(root_bits.len(), SPX_N * 8);
+    let msg = witness_bytes_from_bits::<SPX_N>(root_bits);
+    wots_pk_from_sig_bits_linked(cs, addr_base, sig, &msg, bus)
+}
+
 /// Synthesize `wots_pk_from_sig` and enforce the recovered key equals
 /// `expected_pk` (used for bit-exact validation against PQClean).
 pub fn synthesize_wots_pk_from_sig<Scalar, CS>(
@@ -220,6 +316,58 @@ mod tests {
         let mut cs = TestConstraintSystem::<Fr>::new();
         synthesize_wots_pk_from_sig(&mut cs, pub_seed, addr, sig, msg, expected_pk).expect("synth");
         cs.is_satisfied()
+    }
+
+    /// The full 35-chain linked WOTS recovery (core glue + folded steps over one
+    /// shared bus) reproduces the in-core `wots_pk_from_sig_bits`. PQClean-free.
+    #[test]
+    fn linked_wots_pk_matches_in_core() {
+        use crate::satcheck::SatCheckCS;
+        use crate::thash_link::{alloc_thash_f_bus, seeded_state, thash_f_step};
+
+        let pub_seed = [0x21u8; 16];
+        let mut addr = [0u8; 22];
+        addr[13] = 7; // a keypair address, for realism
+        let sig: [u8; SPX_WOTS_BYTES] = core::array::from_fn(|i| (i % 251) as u8);
+        let msg = [0xffu8; 16]; // fast path: 32 no-op chains + 3 checksum chains × 15 steps
+
+        // In-core reference output (35 × 16-byte chain tops).
+        let reference: Vec<[u8; SPX_N]> = {
+            let mut cs = SatCheckCS::<Fr>::new();
+            let bits = wots_pk_from_sig_bits(&mut cs, &pub_seed, &addr, &sig, &msg).unwrap();
+            assert!(cs.is_satisfied());
+            (0..SPX_WOTS_LEN)
+                .map(|c| witness_bytes_from_bits::<SPX_N>(&bits[c * SPX_N * 8..(c + 1) * SPX_N * 8]))
+                .collect()
+        };
+
+        // Offloaded: linked core glue + folded steps share one bus.
+        let values = wots_pk_bus_values(&pub_seed, &addr, &sig, &msg);
+        let seeded = seeded_state(&pub_seed);
+        let mut cs = SatCheckCS::<Fr>::new();
+        let bus = alloc_thash_f_bus(cs.namespace(|| "bus"), &values).unwrap();
+        let pk_bits =
+            wots_pk_from_sig_bits_linked(cs.namespace(|| "wots"), &addr, &sig, &msg, &bus).unwrap();
+        for (k, v) in values.iter().enumerate() {
+            let slot = &bus[k * THASH_F_SLOT_LEN..(k + 1) * THASH_F_SLOT_LEN];
+            thash_f_step(
+                cs.namespace(|| format!("step_{k}")),
+                &seeded,
+                &v.addr,
+                &v.input,
+                slot,
+            )
+            .unwrap();
+        }
+        assert!(
+            cs.is_satisfied(),
+            "linked wots unsatisfied at {:?}",
+            cs.first_unsatisfied_path()
+        );
+        for c in 0..SPX_WOTS_LEN {
+            let got = witness_bytes_from_bits::<SPX_N>(&pk_bits[c * SPX_N * 8..(c + 1) * SPX_N * 8]);
+            assert_eq!(got, reference[c], "chain {c} mismatch");
+        }
     }
 
     #[test]

@@ -27,8 +27,9 @@ pub mod wots;
 pub use chain::{enforce_sha256_words_equal, synthesize_sha256_state_equal};
 pub use sha256_compress::synthesize_compression_chain_for_fold;
 pub use fors::{
-    fors_pk_from_sig_bits, message_to_indices, synthesize_fors_pk_from_sig, SPX_FORS_BYTES,
-    SPX_FORS_MSG_BYTES, SPX_FORS_TREES,
+    fors_pk_bus_values, fors_pk_from_sig_bits, fors_pk_from_sig_bits_linked, message_to_indices,
+    synthesize_fors_pk_from_sig, FORS_F_CALLS, FORS_H_CALLS, SPX_FORS_BYTES, SPX_FORS_MSG_BYTES,
+    SPX_FORS_TREES,
 };
 /// `hash_message` gadgets and Phase 2c parse helpers (`parse_mgf_output`, `synthesize_hash_message_parsed`).
 pub use hash_msg::{
@@ -52,7 +53,10 @@ pub use hypertree::{
     hypertree_layer_bits, hypertree_layer_from_root_bits, hypertree_layer_from_root_bits_linked,
     synthesize_hypertree_layer, SPX_TREE_HEIGHT,
 };
-pub use merkle::{compute_root_bits, synthesize_compute_root};
+pub use merkle::{
+    addr_with_height_index, compute_root_bits, compute_root_bits_linked, compute_root_h_bus_values,
+    synthesize_compute_root,
+};
 pub use shared_link::{
     alloc_digest_shared, enforce_bytes_eq_shared, enforce_cond_link_eq_u32,
     enforce_words_eq_shared, link_shared_slice, one_hot_select, u32_words_from_shared, DIGEST_WORDS,
@@ -69,10 +73,12 @@ pub use thash::{
     thash_preimage, witness_bytes_from_bits, ThashStats,
 };
 pub use thash_link::{
-    alloc_thash_f_bus, alloc_thash_f_slot, enforce_num_eq_be_bits, gen_chain_linked,
-    scalar_from_be_bytes, seeded_state, thash_f_block, thash_f_chain_bus_values, thash_f_core_link,
-    thash_f_full_digest, thash_f_out, thash_f_step, thash_f_step_values, ThashFBusValue,
-    F_PREIMAGE_BYTES, THASH_F_SLOT_LEN,
+    alloc_thash_f_bus, alloc_thash_f_slot, alloc_thash_h_bus, alloc_thash_h_slot,
+    enforce_num_eq_be_bits, gen_chain_linked, scalar_from_be_bytes, seeded_state, thash_f_block,
+    thash_f_chain_bus_values, thash_f_core_link, thash_f_full_digest, thash_f_out, thash_f_step,
+    thash_f_step_values, thash_h_block, thash_h_core_link, thash_h_out, thash_h_step,
+    thash_h_step_values, ThashFBusValue, ThashHBusValue, F_PREIMAGE_BYTES, H_PREIMAGE_BYTES,
+    THASH_F_SLOT_LEN, THASH_H_SLOT_LEN,
 };
 pub use verify::{
     enforce_message_padding, enforce_message_padding_witness, synthesize_verify_core,

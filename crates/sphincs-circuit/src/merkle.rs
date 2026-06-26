@@ -16,8 +16,9 @@
 //! index-private variant (booleans + muxes) is a later hardening step.
 
 use crate::thash::{alloc_input_bits, enforce_digest_equals, thash_digest_bits, ADDR_BYTES, SPX_N};
+use crate::thash_link::{thash_h_core_link, thash_h_out, ThashHBusValue, THASH_H_SLOT_LEN};
 use bellpepper::gadgets::boolean::Boolean;
-use bellpepper_core::{ConstraintSystem, SynthesisError};
+use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 
 /// Overlay `tree_height` (offset 17) and `tree_index` (offset 18..22, big-endian
 /// `u32`) onto a copy of the base address — mirrors `set_tree_height` /
@@ -96,6 +97,144 @@ where
     let mut in_bits = left;
     in_bits.extend_from_slice(&right);
     thash_digest_bits(cs.namespace(|| "root"), pub_seed, &addr, &in_bits)
+}
+
+/// Native `compute_root` that records one [`ThashHBusValue`] per Merkle level
+/// (`tree_height` of them), in the same order [`compute_root_bits_linked`] consumes
+/// them. Returns the per-level bus values and the 16-byte root. Pure (no PQClean).
+pub fn compute_root_h_bus_values(
+    pub_seed: &[u8; SPX_N],
+    addr_base: &[u8; ADDR_BYTES],
+    leaf: &[u8; SPX_N],
+    leaf_idx: u32,
+    idx_offset: u32,
+    auth_path: &[u8],
+    tree_height: u32,
+) -> (Vec<ThashHBusValue>, [u8; SPX_N]) {
+    let th = tree_height as usize;
+    assert_eq!(auth_path.len(), th * SPX_N);
+
+    let sib: Vec<[u8; SPX_N]> = (0..th)
+        .map(|j| {
+            let mut s = [0u8; SPX_N];
+            s.copy_from_slice(&auth_path[j * SPX_N..(j + 1) * SPX_N]);
+            s
+        })
+        .collect();
+
+    let mut li = leaf_idx;
+    let mut io = idx_offset;
+    let (mut left, mut right) = if li & 1 == 1 {
+        (sib[0], *leaf)
+    } else {
+        (*leaf, sib[0])
+    };
+
+    let mut values = Vec::with_capacity(th);
+    for i in 0..th - 1 {
+        li >>= 1;
+        io >>= 1;
+        let addr = addr_with_height_index(addr_base, (i + 1) as u32, li.wrapping_add(io));
+        let out = thash_h_out(pub_seed, &addr, &left, &right);
+        values.push(ThashHBusValue {
+            addr,
+            in0: left,
+            in1: right,
+            out,
+        });
+        if li & 1 == 1 {
+            right = out;
+            left = sib[i + 1];
+        } else {
+            left = out;
+            right = sib[i + 1];
+        }
+    }
+
+    li >>= 1;
+    io >>= 1;
+    let addr = addr_with_height_index(addr_base, tree_height, li.wrapping_add(io));
+    let out = thash_h_out(pub_seed, &addr, &left, &right);
+    values.push(ThashHBusValue {
+        addr,
+        in0: left,
+        in1: right,
+        out,
+    });
+    (values, out)
+}
+
+/// Trace-linked [`compute_root_bits`]: every level's `thash`-H is a shared-bus link
+/// to a folded step instead of an in-core SHA-256. `h_bus` holds `THASH_H_SLOT_LEN`
+/// field elements per level (`tree_height` levels); no `pub_seed` is needed.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_root_bits_linked<Scalar, CS>(
+    mut cs: CS,
+    addr_base: &[u8; ADDR_BYTES],
+    leaf_bits: &[Boolean],
+    leaf_idx: u32,
+    idx_offset: u32,
+    auth_path: &[u8],
+    tree_height: u32,
+    h_bus: &[AllocatedNum<Scalar>],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let th = tree_height as usize;
+    assert!(th >= 1, "tree_height must be >= 1");
+    assert_eq!(leaf_bits.len(), SPX_N * 8, "leaf_bits must be 128 bits");
+    assert_eq!(auth_path.len(), th * SPX_N, "auth_path must be tree_height SPX_N-blocks");
+    assert_eq!(h_bus.len(), th * THASH_H_SLOT_LEN, "h_bus must be tree_height slots");
+
+    let sibling_bits: Vec<Vec<Boolean>> = (0..th)
+        .map(|j| {
+            let s = &auth_path[j * SPX_N..(j + 1) * SPX_N];
+            alloc_input_bits(&mut cs, &format!("auth_{j}"), s)
+        })
+        .collect::<Result<_, _>>()?;
+
+    let mut li = leaf_idx;
+    let mut io = idx_offset;
+
+    let (mut left, mut right) = if li & 1 == 1 {
+        (sibling_bits[0].clone(), leaf_bits.to_vec())
+    } else {
+        (leaf_bits.to_vec(), sibling_bits[0].clone())
+    };
+
+    let slot = |k: usize| &h_bus[k * THASH_H_SLOT_LEN..(k + 1) * THASH_H_SLOT_LEN];
+
+    for i in 0..th - 1 {
+        li >>= 1;
+        io >>= 1;
+        let addr = addr_with_height_index(addr_base, (i + 1) as u32, li.wrapping_add(io));
+
+        let mut in_bits = left;
+        in_bits.extend_from_slice(&right);
+        let node = thash_h_core_link(
+            cs.namespace(|| format!("level_{i}")),
+            &addr,
+            &in_bits,
+            slot(i),
+        )?;
+
+        if li & 1 == 1 {
+            right = node;
+            left = sibling_bits[i + 1].clone();
+        } else {
+            left = node;
+            right = sibling_bits[i + 1].clone();
+        }
+    }
+
+    li >>= 1;
+    io >>= 1;
+    let addr = addr_with_height_index(addr_base, tree_height, li.wrapping_add(io));
+    let mut in_bits = left;
+    in_bits.extend_from_slice(&right);
+    thash_h_core_link(cs.namespace(|| "root"), &addr, &in_bits, slot(th - 1))
 }
 
 /// Synthesize `compute_root`: constrain that folding the `leaf` up through the
@@ -195,6 +334,78 @@ mod tests {
                 "HT-height mismatch at idx={leaf_idx} off={idx_offset}"
             );
         }
+    }
+
+    /// Offloaded `compute_root` (H bus + folded steps) reproduces the in-core walk.
+    #[test]
+    fn compute_root_offload_matches_in_core() {
+        use crate::satcheck::SatCheckCS;
+        use crate::thash::{alloc_input_bits, witness_bytes_from_bits};
+        use crate::thash_link::{alloc_thash_h_bus, seeded_state, thash_h_step};
+
+        let pub_seed = [0x11u8; 16];
+        let addr = [0x22u8; 22];
+        let leaf = [0x33u8; 16];
+        let th = 9u32;
+        let auth: Vec<u8> = (0..th as usize * 16).map(|i| i as u8).collect();
+        let leaf_idx = 277u32;
+        let idx_offset = 0u32;
+
+        let reference = {
+            let mut cs = SatCheckCS::<Fr>::new();
+            let leaf_bits = alloc_input_bits(&mut cs, "leaf", &leaf).unwrap();
+            let root = compute_root_bits(
+                cs.namespace(|| "w"),
+                &pub_seed,
+                &addr,
+                &leaf_bits,
+                leaf_idx,
+                idx_offset,
+                &auth,
+                th,
+            )
+            .unwrap();
+            assert!(cs.is_satisfied());
+            witness_bytes_from_bits::<16>(&root)
+        };
+
+        let (values, root_native) =
+            compute_root_h_bus_values(&pub_seed, &addr, &leaf, leaf_idx, idx_offset, &auth, th);
+        assert_eq!(root_native, reference);
+
+        let seeded = seeded_state(&pub_seed);
+        let mut cs = SatCheckCS::<Fr>::new();
+        let bus = alloc_thash_h_bus(cs.namespace(|| "bus"), &values).unwrap();
+        let leaf_bits = alloc_input_bits(&mut cs, "leaf", &leaf).unwrap();
+        let root = compute_root_bits_linked(
+            cs.namespace(|| "w"),
+            &addr,
+            &leaf_bits,
+            leaf_idx,
+            idx_offset,
+            &auth,
+            th,
+            &bus,
+        )
+        .unwrap();
+        for (k, v) in values.iter().enumerate() {
+            let slot = &bus[k * THASH_H_SLOT_LEN..(k + 1) * THASH_H_SLOT_LEN];
+            thash_h_step(
+                cs.namespace(|| format!("step_{k}")),
+                &seeded,
+                &v.addr,
+                &v.in0,
+                &v.in1,
+                slot,
+            )
+            .unwrap();
+        }
+        assert!(
+            cs.is_satisfied(),
+            "offloaded compute_root unsatisfied at {:?}",
+            cs.first_unsatisfied_path()
+        );
+        assert_eq!(witness_bytes_from_bits::<16>(&root), reference);
     }
 
     #[test]

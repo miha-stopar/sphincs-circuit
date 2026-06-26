@@ -453,6 +453,196 @@ where
     Ok(out)
 }
 
+// ===========================================================================
+// thash-H family (inblocks = 2) — the Merkle / FORS node hash.
+//
+//   thash_H(in0, in1, addr) = SHA256( pub_seed(16) ‖ 0^48 ‖ addr(22) ‖ in0(16) ‖ in1(16) )[0:16]
+//
+// The variable region addr(22)‖in0(16)‖in1(16) = 54 bytes plus SHA padding still
+// fits a *single* block after the constant seed block, so — exactly like F — one
+// `thash`-H is one variable compression `Compress(S, block1)`. The bus carries
+// four field elements `[addr, in0, in1, out]` (the 32-byte input is split into two
+// 128-bit halves so every column stays < the scalar field).
+// ===========================================================================
+
+/// `thash`-H (`inblocks = 2`) preimage length: `64 + 22 (addr) + 32 (two inputs)`.
+pub const H_PREIMAGE_BYTES: usize = 64 + ADDR_BYTES + 2 * SPX_N;
+
+/// Number of shared-witness field elements per `thash`-H call (`addr, in0, in1, out`).
+pub const THASH_H_SLOT_LEN: usize = 4;
+
+/// The second (variable) SHA-256 block of a `thash`-H call: `addr ‖ in0 ‖ in1 ‖ pad`.
+pub fn thash_h_block(addr: &[u8; ADDR_BYTES], in0: &[u8; SPX_N], in1: &[u8; SPX_N]) -> [u8; 64] {
+    let mut block = [0u8; 64];
+    block[..ADDR_BYTES].copy_from_slice(addr);
+    block[ADDR_BYTES..ADDR_BYTES + SPX_N].copy_from_slice(in0);
+    block[ADDR_BYTES + SPX_N..ADDR_BYTES + 2 * SPX_N].copy_from_slice(in1);
+    block[ADDR_BYTES + 2 * SPX_N] = 0x80; // SHA-256 padding marker (offset 54)
+    let bit_len = (H_PREIMAGE_BYTES as u64) * 8;
+    block[56..64].copy_from_slice(&bit_len.to_be_bytes());
+    block
+}
+
+/// The 16-byte `thash`-H output (one Merkle/FORS node).
+pub fn thash_h_out(
+    pub_seed: &[u8; SPX_N],
+    addr: &[u8; ADDR_BYTES],
+    in0: &[u8; SPX_N],
+    in1: &[u8; SPX_N],
+) -> [u8; SPX_N] {
+    let mut state = state_bytes_to_words(&seeded_state(pub_seed));
+    let block1 = thash_h_block(addr, in0, in1);
+    let ga = sha2::digest::generic_array::GenericArray::clone_from_slice(&block1);
+    sha2::compress256(&mut state, &[ga]);
+    let digest = words_to_be_bytes(&state);
+    let mut out = [0u8; SPX_N];
+    out.copy_from_slice(&digest[..SPX_N]);
+    out
+}
+
+/// One `thash`-H bus entry's native values: `(addr, in0, in1, out)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThashHBusValue {
+    pub addr: [u8; ADDR_BYTES],
+    pub in0: [u8; SPX_N],
+    pub in1: [u8; SPX_N],
+    pub out: [u8; SPX_N],
+}
+
+/// Allocate one `thash`-H bus entry (`[addr, in0, in1, out]`) as shared witnesses.
+pub fn alloc_thash_h_slot<Scalar, CS>(
+    mut cs: CS,
+    value: &ThashHBusValue,
+) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let addr = AllocatedNum::alloc(cs.namespace(|| "addr"), || {
+        Ok(scalar_from_be_bytes(&value.addr))
+    })?;
+    let in0 = AllocatedNum::alloc(cs.namespace(|| "in0"), || {
+        Ok(scalar_from_be_bytes(&value.in0))
+    })?;
+    let in1 = AllocatedNum::alloc(cs.namespace(|| "in1"), || {
+        Ok(scalar_from_be_bytes(&value.in1))
+    })?;
+    let out = AllocatedNum::alloc(cs.namespace(|| "out"), || {
+        Ok(scalar_from_be_bytes(&value.out))
+    })?;
+    Ok(vec![addr, in0, in1, out])
+}
+
+/// Allocate a whole `thash`-H bus (`THASH_H_SLOT_LEN` field elements per call).
+pub fn alloc_thash_h_bus<Scalar, CS>(
+    mut cs: CS,
+    values: &[ThashHBusValue],
+) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let mut bus = Vec::with_capacity(values.len() * THASH_H_SLOT_LEN);
+    for (k, v) in values.iter().enumerate() {
+        bus.extend(alloc_thash_h_slot(cs.namespace(|| format!("slot_{k}")), v)?);
+    }
+    Ok(bus)
+}
+
+/// Compute the folded `C_step` witness bits for one `thash`-H call **without**
+/// binding to any bus slot. Returns `(addr_bits, in0_bits, in1_bits, out_bits)`.
+pub fn thash_h_step_values<Scalar, CS>(
+    mut cs: CS,
+    seeded: &[u8; 32],
+    addr: &[u8; ADDR_BYTES],
+    in0: &[u8; SPX_N],
+    in1: &[u8; SPX_N],
+) -> Result<(Vec<Boolean>, Vec<Boolean>, Vec<Boolean>, Vec<Boolean>), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    // Block = addr(22) ‖ in0(16) ‖ in1(16) ‖ pad(10), all but the pad are witness.
+    let addr_bits = alloc_byte_bits(&mut cs.namespace(|| "addr"), "b", addr)?;
+    let in0_bits = alloc_byte_bits(&mut cs.namespace(|| "in0"), "b", in0)?;
+    let in1_bits = alloc_byte_bits(&mut cs.namespace(|| "in1"), "b", in1)?;
+    let pad = {
+        let full = thash_h_block(addr, in0, in1);
+        let mut p = [0u8; 10];
+        p.copy_from_slice(&full[ADDR_BYTES + 2 * SPX_N..]);
+        p
+    };
+    let mut block_bits = Vec::with_capacity(512);
+    block_bits.extend_from_slice(&addr_bits);
+    block_bits.extend_from_slice(&in0_bits);
+    block_bits.extend_from_slice(&in1_bits);
+    block_bits.extend(const_byte_bits(&pad));
+    debug_assert_eq!(block_bits.len(), 512);
+
+    let h_words: Vec<UInt32> = state_bytes_to_words(seeded)
+        .iter()
+        .map(|&w| UInt32::constant(w))
+        .collect();
+    let out_words = sha256_compression_function(cs.namespace(|| "compress"), &block_bits, &h_words)?;
+    let out_bits: Vec<Boolean> = sha256_state_words_to_bits_be(&out_words[..4]);
+    Ok((addr_bits, in0_bits, in1_bits, out_bits))
+}
+
+/// Folded **`C_step`** body for one `thash`-H call: one compression, binds
+/// `addr / in0 / in1 / out` to `slot`.
+pub fn thash_h_step<Scalar, CS>(
+    mut cs: CS,
+    seeded: &[u8; 32],
+    addr: &[u8; ADDR_BYTES],
+    in0: &[u8; SPX_N],
+    in1: &[u8; SPX_N],
+    slot: &[AllocatedNum<Scalar>],
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(slot.len(), THASH_H_SLOT_LEN);
+    let (addr_bits, in0_bits, in1_bits, out_bits) =
+        thash_h_step_values(cs.namespace(|| "compute"), seeded, addr, in0, in1)?;
+    enforce_num_eq_be_bits(cs.namespace(|| "bind_addr"), &slot[0], &addr_bits)?;
+    enforce_num_eq_be_bits(cs.namespace(|| "bind_in0"), &slot[1], &in0_bits)?;
+    enforce_num_eq_be_bits(cs.namespace(|| "bind_in1"), &slot[2], &in1_bits)?;
+    enforce_num_eq_be_bits(cs.namespace(|| "bind_out"), &slot[3], &out_bits)?;
+    Ok(())
+}
+
+/// **`C_core`** glue for one `thash`-H call: bind `addr` (topology constant) and the
+/// 256-bit `in_bits` (= `in0 ‖ in1`, upstream wires) to the bus, return bus `out`.
+///
+/// Performs **no** SHA-256 compression — that lives in the folded [`thash_h_step`].
+pub fn thash_h_core_link<Scalar, CS>(
+    mut cs: CS,
+    addr_const: &[u8; ADDR_BYTES],
+    in_bits: &[Boolean],
+    slot: &[AllocatedNum<Scalar>],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(slot.len(), THASH_H_SLOT_LEN);
+    assert_eq!(in_bits.len(), 2 * SPX_N * 8);
+
+    let addr_bits = const_byte_bits(addr_const);
+    enforce_num_eq_be_bits(cs.namespace(|| "bind_addr"), &slot[0], &addr_bits)?;
+    enforce_num_eq_be_bits(cs.namespace(|| "bind_in0"), &slot[1], &in_bits[..SPX_N * 8])?;
+    enforce_num_eq_be_bits(cs.namespace(|| "bind_in1"), &slot[2], &in_bits[SPX_N * 8..])?;
+
+    let out_val: [u8; SPX_N] = slot[3]
+        .get_value()
+        .map(|s| scalar_low_be_bytes::<Scalar, SPX_N>(&s))
+        .unwrap_or([0u8; SPX_N]);
+    let out_bits = alloc_byte_bits(&mut cs.namespace(|| "out"), "b", &out_val)?;
+    enforce_num_eq_be_bits(cs.namespace(|| "bind_out"), &slot[3], &out_bits)?;
+    Ok(out_bits)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -754,5 +944,90 @@ mod tests {
         let slot = alloc_thash_f_slot(cs.namespace(|| "slot"), &value).unwrap();
         thash_f_step(cs.namespace(|| "step"), &seeded, &ad, &input, &slot).unwrap();
         assert!(!cs.is_satisfied(), "out mismatch must not satisfy");
+    }
+
+    // ===================== thash-H (inblocks = 2) =========================
+
+    /// The native `thash_h_out` equals the in-core `thash_digest_bits` over a
+    /// 256-bit (two-block) input — i.e. our H decomposition matches the gadget.
+    #[test]
+    fn h_native_matches_in_core_thash() {
+        let ps = pub_seed();
+        let ad = addr();
+        let in0 = [0x55u8; 16];
+        let in1 = [0xa6u8; 16];
+
+        let reference = {
+            let mut cs = SatCheckCS::<Fr>::new();
+            let mut in_bits = alloc_input_bits(&mut cs.namespace(|| "i0"), "v", &in0).unwrap();
+            in_bits.extend(alloc_input_bits(&mut cs.namespace(|| "i1"), "v", &in1).unwrap());
+            let digest = thash_digest_bits(cs.namespace(|| "t"), &ps, &ad, &in_bits).unwrap();
+            assert!(cs.is_satisfied());
+            witness_bytes_from_bits::<16>(&digest)
+        };
+        assert_eq!(reference, thash_h_out(&ps, &ad, &in0, &in1));
+    }
+
+    /// Joint H relation: `C_core` link + folded `C_step` over a shared slot is
+    /// satisfiable and the core's downstream wire equals the real node value.
+    #[test]
+    fn h_joint_relation_is_satisfiable_and_correct() {
+        let ps = pub_seed();
+        let ad = addr();
+        let in0 = [0x12u8; 16];
+        let in1 = [0x9fu8; 16];
+        let out = thash_h_out(&ps, &ad, &in0, &in1);
+        let seeded = seeded_state(&ps);
+
+        let mut cs = SatCheckCS::<Fr>::new();
+        let value = ThashHBusValue { addr: ad, in0, in1, out };
+        let slot = alloc_thash_h_slot(cs.namespace(|| "slot"), &value).unwrap();
+
+        let mut in_bits = alloc_input_bits(&mut cs.namespace(|| "i0"), "v", &in0).unwrap();
+        in_bits.extend(alloc_input_bits(&mut cs.namespace(|| "i1"), "v", &in1).unwrap());
+        let out_bits = thash_h_core_link(cs.namespace(|| "core"), &ad, &in_bits, &slot).unwrap();
+        thash_h_step(cs.namespace(|| "step"), &seeded, &ad, &in0, &in1, &slot).unwrap();
+
+        assert!(
+            cs.is_satisfied(),
+            "H joint relation unsatisfied at {:?}",
+            cs.first_unsatisfied_path()
+        );
+        assert_eq!(witness_bytes_from_bits::<16>(&out_bits), out);
+    }
+
+    /// H soundness: tampering any bound field (in0 / in1 / addr / out) breaks it.
+    #[test]
+    fn h_rejects_tampering() {
+        let ps = pub_seed();
+        let ad = addr();
+        let in0 = [0x12u8; 16];
+        let in1 = [0x9fu8; 16];
+        let out = thash_h_out(&ps, &ad, &in0, &in1);
+        let seeded = seeded_state(&ps);
+
+        // in1 mismatch between core binding and step compression.
+        {
+            let mut cs = SatCheckCS::<Fr>::new();
+            let value = ThashHBusValue { addr: ad, in0, in1, out };
+            let slot = alloc_thash_h_slot(cs.namespace(|| "slot"), &value).unwrap();
+            let mut in_bits = alloc_input_bits(&mut cs.namespace(|| "i0"), "v", &in0).unwrap();
+            in_bits.extend(alloc_input_bits(&mut cs.namespace(|| "i1"), "v", &in1).unwrap());
+            let _ = thash_h_core_link(cs.namespace(|| "core"), &ad, &in_bits, &slot).unwrap();
+            let mut bad = in1;
+            bad[0] ^= 1;
+            thash_h_step(cs.namespace(|| "step"), &seeded, &ad, &in0, &bad, &slot).unwrap();
+            assert!(!cs.is_satisfied(), "in1 mismatch must not satisfy");
+        }
+        // out mismatch: bus out disagrees with the step's real compression.
+        {
+            let mut cs = SatCheckCS::<Fr>::new();
+            let mut bad_out = out;
+            bad_out[0] ^= 1;
+            let value = ThashHBusValue { addr: ad, in0, in1, out: bad_out };
+            let slot = alloc_thash_h_slot(cs.namespace(|| "slot"), &value).unwrap();
+            thash_h_step(cs.namespace(|| "step"), &seeded, &ad, &in0, &in1, &slot).unwrap();
+            assert!(!cs.is_satisfied(), "out mismatch must not satisfy");
+        }
     }
 }

@@ -11,7 +11,7 @@ use std::marker::PhantomData;
 use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use spartan2::traits::{circuit::SpartanCircuit, Engine};
 use sphincs_circuit::{
-    alloc_verify_core_offload_shared, verify_core_buses_from_offload_shared,
+    alloc_verify_core_offload_shared, verify_core_buses_from_offload_shared, SPX_D,
     VerifyCoreOffloadWitness,
 };
 
@@ -47,6 +47,13 @@ pub enum ThashFBusRegion {
     Wots,
 }
 
+/// Which contiguous H-bus region of [`VerifyCoreBuses`] a folded `thash`-H step binds to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThashHBusRegion {
+    ForsH,
+    MerkleH,
+}
+
 /// Slice the F-bus columns used by [`super::thash_fold::FoldThashFStepCircuit`] inside a
 /// unified offload shared witness.
 pub fn thash_f_region_columns<'a, Scalar: ff::PrimeField>(
@@ -58,6 +65,48 @@ pub fn thash_f_region_columns<'a, Scalar: ff::PrimeField>(
     match region {
         ThashFBusRegion::ForsF => buses.fors_f,
         ThashFBusRegion::Wots => buses.wots,
+    }
+}
+
+/// Which M-bus region inside unified offload shared witness a folded `thash`-M step binds to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThashMBusRegion {
+    ForsPkM,
+    /// WOTS-pk leaf `thash`-M for hypertree layer `0..SPX_D`.
+    WotsPkM(usize),
+}
+
+/// Slice the M-bus columns used by [`super::thash_fold::FoldThashMStepCircuit`].
+pub fn thash_m_region_columns<'a, Scalar: ff::PrimeField>(
+    shared: &'a [AllocatedNum<Scalar>],
+    ctx: &OffloadSharedContext,
+    region: ThashMBusRegion,
+) -> &'a [AllocatedNum<Scalar>] {
+    use sphincs_circuit::{thash_m_bus_len, WOTS_PK_INBLOCKS};
+
+    let buses = verify_core_buses_from_offload_shared(shared, ctx.num_links(), &ctx.offload);
+    match region {
+        ThashMBusRegion::ForsPkM => buses.fors_pk_m,
+        ThashMBusRegion::WotsPkM(layer) => {
+            assert!(layer < SPX_D);
+            let per_layer = thash_m_bus_len(WOTS_PK_INBLOCKS);
+            let start = layer * per_layer;
+            &buses.wots_pk_m[start..start + per_layer]
+        }
+    }
+}
+
+/// Slice the H-bus columns used by [`super::thash_fold::FoldThashHStepCircuit`] inside a
+/// unified offload shared witness.
+pub fn thash_h_region_columns<'a, Scalar: ff::PrimeField>(
+    shared: &'a [AllocatedNum<Scalar>],
+    ctx: &OffloadSharedContext,
+    region: ThashHBusRegion,
+) -> &'a [AllocatedNum<Scalar>] {
+    let buses = verify_core_buses_from_offload_shared(shared, ctx.num_links(), &ctx.offload);
+    match region {
+        ThashHBusRegion::ForsH => buses.fors_h,
+        ThashHBusRegion::MerkleH => buses.merkle_h,
     }
 }
 
@@ -145,6 +194,19 @@ pub fn pad_thash_f_values_to_power_of_two(
     mut values: Vec<sphincs_circuit::ThashFBusValue>,
     num_steps: usize,
 ) -> Vec<sphincs_circuit::ThashFBusValue> {
+    assert!(num_steps.is_power_of_two());
+    assert!(num_steps >= values.len());
+    while values.len() < num_steps {
+        values.push(values.last().expect("non-empty").clone());
+    }
+    values
+}
+
+/// Pad a `thash`-H value list to `num_steps` (power of two) by duplicating the last entry.
+pub fn pad_thash_h_values_to_power_of_two(
+    mut values: Vec<sphincs_circuit::ThashHBusValue>,
+    num_steps: usize,
+) -> Vec<sphincs_circuit::ThashHBusValue> {
     assert!(num_steps.is_power_of_two());
     assert!(num_steps >= values.len());
     while values.len() < num_steps {

@@ -45,8 +45,9 @@ pub use bound::{
     bound_steps_from_inputs, FoldCoreBoundCircuit, FoldPackedCoreBoundCircuit, FoldStepBoundCircuit,
 };
 pub use offload_shared::{
-    next_power_of_two_steps, pad_thash_f_values_to_power_of_two, FoldStepBoundOffloadCircuit,
-    OffloadSharedContext, ThashFBusRegion,
+    next_power_of_two_steps, pad_thash_f_values_to_power_of_two,
+    pad_thash_h_values_to_power_of_two, FoldStepBoundOffloadCircuit, OffloadSharedContext,
+    ThashFBusRegion, ThashHBusRegion, ThashMBusRegion,
 };
 pub use core::{FoldCoreChainCircuit, FoldCoreCircuit};
 pub use verify_core::{FoldVerifyCoreCircuit, VerifyCorePhase, message_bytes, padded_message, sig_r};
@@ -64,7 +65,8 @@ pub use fold::{
 };
 pub use packed::FoldPackedChainCircuit;
 pub use thash_fold::{
-    thash_f_chain_fold, thash_f_offload_steps_fold, thash_h_compute_root_fold, thash_m_single_call_fold,
+    thash_f_chain_fold, thash_f_offload_steps_fold, thash_h_compute_root_fold,
+    thash_h_offload_steps_fold, thash_m_offload_steps_fold, thash_m_single_call_fold,
     FoldThashFCoreCircuit, FoldThashFStepCircuit, FoldThashHCoreCircuit, FoldThashHStepCircuit,
     FoldThashMCoreCircuit, FoldThashMStepCircuit,
 };

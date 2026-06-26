@@ -33,7 +33,8 @@ use sphincs_circuit::{
     thash::{alloc_input_bits, enforce_bits_equal_bytes, ADDR_BYTES, SPX_N},
     thash_f_chain_bus_values, thash_f_step_values, thash_h_step_values, thash_m_bus_value,
     thash_m_core_link, thash_m_link_count, thash_m_padded_blocks,
-    thash_m_variable_compression_count, verify_core_fors_f_bus_len, ThashFBusValue, ThashHBusValue, ThashMBusValue,
+    thash_m_variable_compression_count, verify_core_fors_f_bus_len, verify_core_fors_h_bus_len,
+    ThashFBusValue, ThashHBusValue, ThashMBusValue,
     DIGEST_WORDS, THASH_F_SLOT_LEN, THASH_H_SLOT_LEN,
 };
 
@@ -418,6 +419,8 @@ pub struct FoldThashHStepCircuit {
     pub seeded: [u8; 32],
     pub values: Vec<ThashHBusValue>,
     pub step_index: usize,
+    pub offload_ctx: Option<crate::offload_shared::OffloadSharedContext>,
+    pub h_region: crate::offload_shared::ThashHBusRegion,
     _p: PhantomData<Scalar>,
 }
 
@@ -428,8 +431,24 @@ impl FoldThashHStepCircuit {
             seeded,
             values,
             step_index,
+            offload_ctx: None,
+            h_region: crate::offload_shared::ThashHBusRegion::ForsH,
             _p: PhantomData,
         }
+    }
+
+    pub fn with_offload_ctx(
+        mut self,
+        ctx: crate::offload_shared::OffloadSharedContext,
+        region: crate::offload_shared::ThashHBusRegion,
+    ) -> Self {
+        self.offload_ctx = Some(ctx);
+        self.h_region = region;
+        self
+    }
+
+    fn num_steps(&self) -> usize {
+        self.values.len()
     }
 }
 
@@ -442,7 +461,15 @@ impl SpartanCircuit<E> for FoldThashHStepCircuit {
         &self,
         cs: &mut CS,
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
-        alloc_thash_h_bus(cs.namespace(|| "thash_h_bus"), &self.values)
+        if let Some(ctx) = &self.offload_ctx {
+            alloc_verify_core_offload_shared(
+                cs.namespace(|| "offload_shared"),
+                &ctx.link_digests,
+                &ctx.offload,
+            )
+        } else {
+            alloc_thash_h_bus(cs.namespace(|| "thash_h_bus"), &self.values)
+        }
     }
 
     fn precommitted<CS: ConstraintSystem<Scalar>>(
@@ -450,7 +477,7 @@ impl SpartanCircuit<E> for FoldThashHStepCircuit {
         cs: &mut CS,
         shared: &[AllocatedNum<Scalar>],
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
-        let pos = alloc_step_selector(cs, self.step_index, self.values.len())?;
+        let pos = alloc_step_selector(cs, self.step_index, self.num_steps())?;
         let own = &self.values[self.step_index];
         let (addr_bits, in0_bits, in1_bits, out_bits) = thash_h_step_values(
             cs.namespace(|| "compute"),
@@ -459,13 +486,40 @@ impl SpartanCircuit<E> for FoldThashHStepCircuit {
             &own.in0,
             &own.in1,
         )?;
+
+        let h_bus = if let Some(ctx) = &self.offload_ctx {
+            crate::offload_shared::thash_h_region_columns(shared, ctx, self.h_region)
+        } else {
+            shared
+        };
+
+        let bus_slots = if self.offload_ctx.is_some() {
+            match self.h_region {
+                crate::offload_shared::ThashHBusRegion::ForsH => {
+                    verify_core_fors_h_bus_len() / THASH_H_SLOT_LEN
+                }
+                crate::offload_shared::ThashHBusRegion::MerkleH => {
+                    self.offload_ctx.as_ref().unwrap().offload.merkle_h.len()
+                }
+            }
+        } else {
+            self.values.len()
+        };
+        let active = alloc_bus_active_gate(cs, &pos, bus_slots)?;
+
         for (field, bits) in [
             (0usize, &addr_bits),
             (1, &in0_bits),
             (2, &in1_bits),
             (3, &out_bits),
         ] {
-            bind_muxed_column(cs, &pos, shared, THASH_H_SLOT_LEN, field, bits)?;
+            if self.offload_ctx.is_some() {
+                bind_muxed_column_gated(
+                    cs, &active, &pos, h_bus, THASH_H_SLOT_LEN, field, bits, bus_slots,
+                )?;
+            } else {
+                bind_muxed_column(cs, &pos, h_bus, THASH_H_SLOT_LEN, field, bits)?;
+            }
         }
         Ok(vec![])
     }
@@ -599,6 +653,23 @@ pub fn thash_f_offload_steps_fold(
         .collect()
 }
 
+/// Build `thash`-H fold steps that share the offloaded verify-core witness layout.
+pub fn thash_h_offload_steps_fold(
+    seeded: [u8; 32],
+    values: Vec<ThashHBusValue>,
+    ctx: crate::offload_shared::OffloadSharedContext,
+    region: crate::offload_shared::ThashHBusRegion,
+    num_steps: usize,
+) -> Vec<FoldThashHStepCircuit> {
+    assert!(num_steps.is_power_of_two());
+    let values = crate::offload_shared::pad_thash_h_values_to_power_of_two(values, num_steps);
+    (0..num_steps)
+        .map(|i| {
+            FoldThashHStepCircuit::new(seeded, values.clone(), i).with_offload_ctx(ctx.clone(), region)
+        })
+        .collect()
+}
+
 // ===========================================================================
 // thash-M fold (multi-block FORS-pk / WOTS-pk compressions)
 // ===========================================================================
@@ -640,6 +711,28 @@ where
     Ok(())
 }
 
+/// Boolean AND of two `{0,1}` witness gates (`c = a·b`).
+fn and_gate<CS: ConstraintSystem<Scalar>>(
+    cs: &mut CS,
+    ns: &str,
+    a: &AllocatedNum<Scalar>,
+    b: &AllocatedNum<Scalar>,
+) -> Result<AllocatedNum<Scalar>, SynthesisError> {
+    let c = AllocatedNum::alloc(cs.namespace(|| format!("{ns}_and")), || {
+        Ok(a.get_value()
+            .zip(b.get_value())
+            .map(|(x, y)| x * y)
+            .unwrap_or(Scalar::ZERO))
+    })?;
+    cs.enforce(
+        || format!("{ns}_and_mul"),
+        |lc| lc + a.get_variable(),
+        |lc| lc + b.get_variable(),
+        |lc| lc + c.get_variable(),
+    );
+    Ok(c)
+}
+
 /// Uniform folded `thash`-M compression step (identical R1CS across instances).
 fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
     cs: &mut CS,
@@ -649,6 +742,7 @@ fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
     num_steps: usize,
     inblocks: usize,
     bus: &[AllocatedNum<Scalar>],
+    gated_var_count: Option<usize>,
 ) -> Result<(), SynthesisError> {
     let var_count = thash_m_variable_compression_count(inblocks);
     let num_links = thash_m_link_count(inblocks);
@@ -656,6 +750,17 @@ fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
     assert!(step_index < num_steps);
 
     let pos = alloc_step_selector(cs, step_index, num_steps)?;
+
+    let (first_gate, last_gate) = if let Some(vc) = gated_var_count {
+        assert_eq!(vc, var_count);
+        let active = alloc_bus_active_gate(cs, &pos, vc)?;
+        (
+            and_gate(cs, "first", &pos[0], &active)?,
+            and_gate(cs, "last", &pos[vc - 1], &active)?,
+        )
+    } else {
+        (pos[0].clone(), pos[var_count - 1].clone())
+    };
 
     let h_in_words: Vec<UInt32> = state_bytes_to_words(h_in)
         .iter()
@@ -679,14 +784,13 @@ fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
             one_hot_select(cs.namespace(|| format!("in_mux_{j}")), &in_sel, &vals)?;
         enforce_cond_link_eq_u32(
             cs.namespace(|| format!("in_bind_{j}")),
-            &pos[0],
+            &first_gate,
             &in_link,
             &h_in_words[j],
         )?;
     }
 
     let out_sel: Vec<AllocatedNum<Scalar>> = (0..num_links).map(|k| pos[k].clone()).collect();
-    let last = &pos[var_count - 1];
     for j in 0..DIGEST_WORDS {
         let vals: Vec<AllocatedNum<Scalar>> = (0..num_links)
             .map(|k| thash_m_link_slice(bus, inblocks, k)[j].clone())
@@ -695,7 +799,7 @@ fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
             one_hot_select(cs.namespace(|| format!("out_mux_{j}")), &out_sel, &vals)?;
         enforce_cond_link_eq_u32(
             cs.namespace(|| format!("out_link_{j}")),
-            last,
+            &last_gate,
             &out_link,
             &out_words[j],
         )?;
@@ -705,7 +809,7 @@ fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
     let out_field = &bus[bus.len() - 1];
     enforce_when_num_eq_be_bits(
         cs.namespace(|| "out_field"),
-        last,
+        &last_gate,
         out_field,
         &out_bits,
     )?;
@@ -730,6 +834,8 @@ pub struct FoldThashMStepCircuit {
     pub inblocks: usize,
     pub step_index: usize,
     pub num_steps: usize,
+    pub offload_ctx: Option<crate::offload_shared::OffloadSharedContext>,
+    pub m_region: crate::offload_shared::ThashMBusRegion,
     _p: PhantomData<Scalar>,
 }
 
@@ -752,8 +858,20 @@ impl FoldThashMStepCircuit {
             inblocks,
             step_index,
             num_steps,
+            offload_ctx: None,
+            m_region: crate::offload_shared::ThashMBusRegion::ForsPkM,
             _p: PhantomData,
         }
+    }
+
+    pub fn with_offload_ctx(
+        mut self,
+        ctx: crate::offload_shared::OffloadSharedContext,
+        region: crate::offload_shared::ThashMBusRegion,
+    ) -> Self {
+        self.offload_ctx = Some(ctx);
+        self.m_region = region;
+        self
     }
 }
 
@@ -766,7 +884,15 @@ impl SpartanCircuit<E> for FoldThashMStepCircuit {
         &self,
         cs: &mut CS,
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
-        alloc_thash_m_bus(cs.namespace(|| "thash_m_bus"), &self.value)
+        if let Some(ctx) = &self.offload_ctx {
+            alloc_verify_core_offload_shared(
+                cs.namespace(|| "offload_shared"),
+                &ctx.link_digests,
+                &ctx.offload,
+            )
+        } else {
+            alloc_thash_m_bus(cs.namespace(|| "thash_m_bus"), &self.value)
+        }
     }
 
     fn precommitted<CS: ConstraintSystem<Scalar>>(
@@ -774,6 +900,13 @@ impl SpartanCircuit<E> for FoldThashMStepCircuit {
         cs: &mut CS,
         shared: &[AllocatedNum<Scalar>],
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
+        let m_bus = if let Some(ctx) = &self.offload_ctx {
+            crate::offload_shared::thash_m_region_columns(shared, ctx, self.m_region)
+        } else {
+            shared
+        };
+        let var_count = thash_m_variable_compression_count(self.inblocks);
+        let gated = self.offload_ctx.is_some().then_some(var_count);
         synthesize_thash_m_step_fold(
             cs,
             &self.h_in,
@@ -781,7 +914,8 @@ impl SpartanCircuit<E> for FoldThashMStepCircuit {
             self.step_index,
             self.num_steps,
             self.inblocks,
-            shared,
+            m_bus,
+            gated,
         )?;
         Ok(vec![])
     }
@@ -903,6 +1037,39 @@ pub fn thash_m_single_call_fold(
     (step_circuits, core)
 }
 
+/// Build `thash`-M fold steps sharing the offloaded verify-core witness layout.
+pub fn thash_m_offload_steps_fold(
+    pub_seed: &[u8; SPX_N],
+    value: ThashMBusValue,
+    inblocks: usize,
+    ctx: crate::offload_shared::OffloadSharedContext,
+    region: crate::offload_shared::ThashMBusRegion,
+    num_steps: usize,
+) -> Vec<FoldThashMStepCircuit> {
+    let var_count = thash_m_variable_compression_count(inblocks);
+    assert!(num_steps.is_power_of_two());
+    assert!(num_steps >= var_count);
+    let seeded = seeded_state(pub_seed);
+    let blocks = thash_m_padded_blocks(pub_seed, &value.addr, &value.input);
+    (0..num_steps)
+        .map(|i| {
+            let eff = if i < var_count { i } else { var_count - 1 };
+            let h_in = thash_m_step_h_in(&seeded, &value, eff);
+            let block = blocks[eff + 1];
+            FoldThashMStepCircuit::new(
+                seeded,
+                value.clone(),
+                h_in,
+                block,
+                inblocks,
+                i,
+                num_steps,
+            )
+            .with_offload_ctx(ctx.clone(), region)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,6 +1103,7 @@ mod tests {
                 var_count,
                 inblocks,
                 &bus,
+                None,
             )
             .unwrap();
         }

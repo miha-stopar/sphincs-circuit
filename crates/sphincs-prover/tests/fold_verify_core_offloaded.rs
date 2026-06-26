@@ -9,12 +9,14 @@
 use circuit_spec::Sha256Compression;
 use sphincs_circuit::{
     hash_message_mgf_buf, parse_mgf_output, seeded_state, thash::SPX_N, FORS_F_CALLS,
+    FORS_H_CALLS, FORS_PK_INBLOCKS, thash_m_variable_compression_count,
 };
 use sphincs_prover::{
     fold_and_prove_general, longest_chain_bound, next_power_of_two_steps,
     offload_shared_context_from_pqclean, setup_with_proto, sig_r, thash_f_offload_steps_fold,
-    verify_proof, FoldStepBoundOffloadCircuit, FoldVerifyCoreCircuit, OffloadSharedContext,
-    ThashFBusRegion, padded_message,
+    thash_h_offload_steps_fold, thash_m_offload_steps_fold, verify_proof,
+    FoldStepBoundOffloadCircuit, FoldVerifyCoreCircuit, OffloadSharedContext, ThashFBusRegion,
+    ThashHBusRegion, ThashMBusRegion, padded_message,
 };
 use sphincs_ref::{sign_deterministic, verify_with_trace, CRYPTO_SEEDBYTES};
 
@@ -118,6 +120,98 @@ fn fold_verify_core_offloaded_fors_f_smoke() {
         fors_f,
         OffloadSharedContext::new(vec![], ctx.offload.clone()),
         ThashFBusRegion::ForsF,
+        n,
+    );
+
+    let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
+    let proof = fold_and_prove_general(&pk_fold, &steps, &core);
+    verify_proof(&vk, &proof, steps.len());
+}
+
+/// FORS Merkle-node `thash`-H steps + offloaded core (unified shared; HM links empty).
+#[test]
+fn fold_verify_core_offloaded_fors_h_smoke() {
+    let seed = [0x7cu8; CRYPTO_SEEDBYTES];
+    let msg = b"offloaded verify core fors h smoke";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+
+    let (message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+    let hm = parse_mgf_output(&hm_mgf);
+
+    let ctx = offload_shared_context_from_pqclean(&pk, &sig, &hm, vec![]);
+    let core = FoldVerifyCoreCircuit::offloaded(
+        pk,
+        message,
+        mlen,
+        sig,
+        r,
+        hm_mgf,
+        vec![],
+        ctx.offload.clone(),
+    );
+
+    let pub_seed = {
+        let mut s = [0u8; SPX_N];
+        s.copy_from_slice(&pk[..SPX_N]);
+        s
+    };
+    let seeded = seeded_state(&pub_seed);
+    let fors_h = ctx.offload.fors_h.clone();
+    assert_eq!(fors_h.len(), FORS_H_CALLS);
+    let n = next_power_of_two_steps(FORS_H_CALLS);
+    let steps = thash_h_offload_steps_fold(
+        seeded,
+        fors_h,
+        OffloadSharedContext::new(vec![], ctx.offload.clone()),
+        ThashHBusRegion::ForsH,
+        n,
+    );
+
+    let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
+    let proof = fold_and_prove_general(&pk_fold, &steps, &core);
+    verify_proof(&vk, &proof, steps.len());
+}
+
+/// FORS horizontal pk `thash`-M steps + offloaded core (unified shared; HM links empty).
+#[test]
+fn fold_verify_core_offloaded_fors_pk_m_smoke() {
+    let seed = [0x8du8; CRYPTO_SEEDBYTES];
+    let msg = b"offloaded verify core fors pk m smoke";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+
+    let (message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+    let hm = parse_mgf_output(&hm_mgf);
+
+    let ctx = offload_shared_context_from_pqclean(&pk, &sig, &hm, vec![]);
+    let core = FoldVerifyCoreCircuit::offloaded(
+        pk,
+        message,
+        mlen,
+        sig,
+        r,
+        hm_mgf,
+        vec![],
+        ctx.offload.clone(),
+    );
+
+    let pub_seed = {
+        let mut s = [0u8; SPX_N];
+        s.copy_from_slice(&pk[..SPX_N]);
+        s
+    };
+    let fors_pk_m = ctx.offload.fors_pk_m.clone();
+    let var_count = thash_m_variable_compression_count(FORS_PK_INBLOCKS);
+    let n = next_power_of_two_steps(var_count);
+    let steps = thash_m_offload_steps_fold(
+        &pub_seed,
+        fors_pk_m,
+        FORS_PK_INBLOCKS,
+        OffloadSharedContext::new(vec![], ctx.offload.clone()),
+        ThashMBusRegion::ForsPkM,
         n,
     );
 

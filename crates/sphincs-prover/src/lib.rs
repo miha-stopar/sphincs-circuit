@@ -34,6 +34,7 @@ mod bound;
 mod core;
 mod fold;
 mod packed;
+mod thash_fold;
 mod trace;
 mod verify_core;
 #[cfg(feature = "pqclean")]
@@ -49,10 +50,14 @@ pub use sphincs_circuit::pack_verify_public;
 #[cfg(feature = "pqclean")]
 pub use verify_witness::{fold_verify_core_from_pqclean, intermediate_roots_oracle};
 pub use fold::{
-    fold_and_prove, fold_prove_verify_timed, setup, setup_with_default_core, setup_with_proto,
-    verify_proof, E, FoldProof, FoldProverKey, FoldStepCircuit, FoldVerifierKey, ProveTimings,
+    fold_and_prove, fold_and_prove_general, fold_and_prove_with, fold_prove_verify_timed, setup,
+    setup_with_default_core, setup_with_proto, verify_proof, E, FoldProof, FoldProverKey,
+    FoldStepCircuit, FoldVerifierKey, ProveTimings,
 };
 pub use packed::FoldPackedChainCircuit;
+pub use thash_fold::{
+    thash_f_chain_fold, FoldThashFCoreCircuit, FoldThashFStepCircuit,
+};
 pub use trace::{
     chain_boundary_links, fold_steps_from_rows, fold_steps_prefix, hash_message_chain_prefix,
     hash_message_full_span_plain, hash_message_seed_chain_bound, hash_message_trace_inputs,

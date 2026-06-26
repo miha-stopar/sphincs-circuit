@@ -212,8 +212,9 @@ fn scalar_low_be_bytes<Scalar: PrimeField, const N: usize>(s: &Scalar) -> [u8; N
 /// Enforce `num == Σ_i bits[i] · 2^(n-1-i)` (big-endian) with one R1CS row.
 ///
 /// `bits` may mix constants and variables; works for any `bits.len()` whose value
-/// fits the scalar field (all uses here are ≤ 176 bits).
-fn enforce_num_eq_be_bits<Scalar, CS>(
+/// fits the scalar field (all uses here are ≤ 176 bits). Public so fold-step
+/// circuits can bind a muxed shared-bus column to a step's witness bits.
+pub fn enforce_num_eq_be_bits<Scalar, CS>(
     mut cs: CS,
     num: &AllocatedNum<Scalar>,
     bits: &[Boolean],
@@ -314,25 +315,23 @@ where
 // C_step: the folded compression instance.
 // ---------------------------------------------------------------------------
 
-/// Folded **`C_step`** body for one `thash`-F call.
+/// Compute the folded `C_step` witness bits for one `thash`-F call **without**
+/// binding to any bus slot: pins `h_in = seeded` and the pad bytes to constants,
+/// allocates `addr‖in` as the block witness, runs one SHA-256 compression, and
+/// returns `(addr_bits, in_bits, out_bits)` (each big-endian).
 ///
-/// Pins `h_in = seeded` and the pad bytes to constants, allocates `addr‖in` as the
-/// block witness, runs one SHA-256 compression, and binds `addr`/`in`/`out` to the
-/// `slot` (`[addr, in, out]`). The compression output `[0:16]` is bound to the bus
-/// `out`; nothing else leaves the step.
-pub fn thash_f_step<Scalar, CS>(
+/// [`thash_f_step`] binds these to a fixed slot; a fold step circuit binds them to
+/// a selector-muxed shared column (uniform R1CS shape across folded instances).
+pub fn thash_f_step_values<Scalar, CS>(
     mut cs: CS,
     seeded: &[u8; 32],
     addr: &[u8; ADDR_BYTES],
     input: &[u8; SPX_N],
-    slot: &[AllocatedNum<Scalar>],
-) -> Result<(), SynthesisError>
+) -> Result<(Vec<Boolean>, Vec<Boolean>, Vec<Boolean>), SynthesisError>
 where
     Scalar: PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    assert_eq!(slot.len(), THASH_F_SLOT_LEN);
-
     // Block = addr(22, witness) ‖ in(16, witness) ‖ pad(26, constant).
     let addr_bits = alloc_byte_bits(&mut cs.namespace(|| "addr"), "b", addr)?;
     let in_bits = alloc_byte_bits(&mut cs.namespace(|| "in"), "b", input)?;
@@ -356,7 +355,29 @@ where
 
     let out_words = sha256_compression_function(cs.namespace(|| "compress"), &block_bits, &h_words)?;
     let out_bits: Vec<Boolean> = sha256_state_words_to_bits_be(&out_words[..4]); // 128 bits
+    Ok((addr_bits, in_bits, out_bits))
+}
 
+/// Folded **`C_step`** body for one `thash`-F call.
+///
+/// Pins `h_in = seeded` and the pad bytes to constants, allocates `addr‖in` as the
+/// block witness, runs one SHA-256 compression, and binds `addr`/`in`/`out` to the
+/// `slot` (`[addr, in, out]`). The compression output `[0:16]` is bound to the bus
+/// `out`; nothing else leaves the step.
+pub fn thash_f_step<Scalar, CS>(
+    mut cs: CS,
+    seeded: &[u8; 32],
+    addr: &[u8; ADDR_BYTES],
+    input: &[u8; SPX_N],
+    slot: &[AllocatedNum<Scalar>],
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(slot.len(), THASH_F_SLOT_LEN);
+    let (addr_bits, in_bits, out_bits) =
+        thash_f_step_values(cs.namespace(|| "compute"), seeded, addr, input)?;
     enforce_num_eq_be_bits(cs.namespace(|| "bind_addr"), &slot[0], &addr_bits)?;
     enforce_num_eq_be_bits(cs.namespace(|| "bind_in"), &slot[1], &in_bits)?;
     enforce_num_eq_be_bits(cs.namespace(|| "bind_out"), &slot[2], &out_bits)?;

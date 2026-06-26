@@ -9,7 +9,7 @@ constraints in one `C_core`" / "trace-link FORS / WOTS / hypertree too").
 
 ## TL;DR status
 
-- **Done (this increment):** the *sound, self-contained mechanism* for the WOTS+
+- **Done — mechanism:** the *sound, self-contained mechanism* for the WOTS+
   chain `F` function — the single biggest family in the core (~75%). See
   `crates/sphincs-circuit/src/thash_link.rs`.
   - Measured: a full 15-step WOTS chain costs **349,058** constraints in-core but
@@ -17,13 +17,20 @@ constraints in one `C_core`" / "trace-link FORS / WOTS / hypertree too").
     for that family (test `core_link_shrinks_core_vs_in_core`).
   - Soundness is proven by four tamper tests (input / addr / seeded-state / out)
     plus a joint-relation satisfiability test and a fold-decomposition smoke test.
-- **Next increments (not yet wired):**
-  1. Replace `wots::gen_chain` with `thash_link::gen_chain_linked` inside
-     `synthesize_verify_core`'s WOTS path.
-  2. Teach the prover to emit one `thash_f_step` `C_step` per chain step and to
-     populate the bus values, folding them through `spartan2`.
-  3. Generalize the bus/step to the other `thash` families (FORS leaf/node, Merkle
-     node, WOTS-pk compression, hypertree).
+- **Done — verify-core wiring:** `synthesize_verify_core_wots_linked` (in
+  `verify.rs`) threads a per-layer WOTS bus through all 7 hypertree layers using
+  `gen_chain_linked`; FORS, the leaf `thash`, and the Merkle walk stay in-core.
+  Validated on a real PQClean KAT (test
+  `valid_signature_satisfies_core_wots_linked`).
+- **Done — prover fold:** `thash_fold.rs` (in `sphincs-prover`) folds the WOTS+
+  chain `thash`-F compressions as real NeutronNova `C_step` instances bound to a
+  WOTS chain `C_core` over the shared `addr/in/out` bus. Proves **and verifies**
+  end-to-end through `spartan2` (test `fold_thash_f_chain_prove_and_verify`).
+  - The bus columns hold wide field elements, so the fold uses the general
+    commitment path (`fold_and_prove_general`, `is_small = false`) rather than the
+    small-scalar path the `u32`-limbed digest bus uses — see the note below.
+- **Next increment:** generalize the bus/step to the other `thash` families (FORS
+  leaf/node, Merkle node, WOTS-pk compression, hypertree).
 
 ## Why the existing trace-linking did not offload anything
 
@@ -106,8 +113,21 @@ making both relations hold", which is exactly the NeutronNova joint check. The
 `steps_are_independent_instances_sharing_the_bus` test additionally synthesizes
 each step in its **own** constraint system to model the per-instance decomposition.
 
-What these tests do **not** yet cover is the `spartan2` commitment/fold protocol
-plumbing itself (separate commitments, `fold.rs`); that is the next increment.
+The `spartan2` commitment/fold protocol plumbing itself is now covered by
+`fold_thash_f_chain_prove_and_verify` (`sphincs-prover`), which runs the real
+NeutronNova `setup → prove → verify` over `N` folded `thash_f_step` instances + a
+WOTS chain core sharing one `addr/in/out` bus.
+
+### `is_small` and wide bus columns
+
+NeutronNova's commitment has a fast *small-scalar* path (`is_small = true`) valid
+only when **every** committed witness element fits a machine word — the case for
+the existing `8×u32` digest bus (`bound.rs`). The `thash`-F bus packs each
+`addr`/`in`/`out` as one wide field element (176-/128-bit), so it must use the
+**general** commitment path (`is_small = false`, via `fold_and_prove_general`).
+Using the small path with wide columns yields a commitment that disagrees with the
+witness and fails verification with `InvalidPCS { "… First equation failed" }`.
+(A future optimization could `u32`-limb the bus to re-enable the small path.)
 
 ## Public API (`sphincs_circuit::thash_link`)
 
@@ -118,19 +138,31 @@ plumbing itself (separate commitments, `fold.rs`); that is the next increment.
 | `thash_f_chain_bus_values(...)` | native WOTS chain → per-step `(addr,in,out)` + final |
 | `ThashFBusValue` | one bus entry's native values |
 | `alloc_thash_f_slot / alloc_thash_f_bus` | allocate shared columns |
-| `thash_f_step(...)` | folded `C_step` body |
+| `thash_f_step(...)` | folded `C_step` body (fixed slot) |
+| `thash_f_step_values(...)` | compute step `addr/in/out` bits without binding (for muxed fold steps) |
 | `thash_f_core_link(...)` | `C_core` glue for one call |
 | `gen_chain_linked(...)` | trace-linked replacement for `wots::gen_chain` |
 
+WOTS layer / verify-core helpers:
+
+| item | crate · role |
+|------|--------------|
+| `wots::wots_pk_from_sig_bits_linked` / `_root_bits_linked` | `sphincs-circuit` · WOTS pk recovery over a bus |
+| `wots::wots_pk_bus_values` / `wots_step_count` | `sphincs-circuit` · native bus builder / bus sizing |
+| `verify::synthesize_verify_core_wots_linked` | `sphincs-circuit` · full verify core with WOTS offloaded |
+| `thash_fold::{FoldThashFStepCircuit, FoldThashFCoreCircuit, thash_f_chain_fold}` | `sphincs-prover` · NeutronNova fold of a WOTS chain |
+| `fold::fold_and_prove_general` | `sphincs-prover` · prove with the general (wide-column) commitment path |
+
 ## Roadmap to fully shrink `C_core`
 
-1. **Wire WOTS in-core (`verify.rs`).** Swap `gen_chain` → `gen_chain_linked` in
-   the hypertree WOTS path, threading a bus segment per chain. `C_core` then holds
-   only WOTS glue for ~3,600 chain steps instead of ~7M+ SHA constraints.
-2. **Prover fold (`sphincs-prover`).** Build the bus values from the PQClean trace
-   (each `thash`-F's second compression is one trace row with `h_in == S`), emit a
-   `thash_f_step` `C_step` per step, and fold via `spartan2` with the bus columns
-   concatenated into `comm_W_shared` next to the existing link digests.
+1. ~~**Wire WOTS in-core (`verify.rs`).**~~ **Done** — `gen_chain_linked` threaded
+   through all 7 hypertree layers via `synthesize_verify_core_wots_linked`; the
+   core holds only WOTS glue instead of the chain SHA constraints.
+2. ~~**Prover fold (`sphincs-prover`).**~~ **Done (chain-level)** — `thash_fold.rs`
+   folds a WOTS chain's `thash`-F steps and proves+verifies through `spartan2`.
+   Remaining: drive the bus from a full PQClean verify trace and fold all 7 layers'
+   steps + the full `synthesize_verify_core_wots_linked` core in one proof (extend
+   `comm_W_shared` to carry the `link_digests` *and* the `thash`-F bus together).
 3. **Other families.** Generalize the bus to multi-block `thash`es:
    - FORS leaf `F` and Merkle node `H` (`inblocks = 1` / `2` → 2 compressions),
    - FORS root and WOTS-pk compression (`inblocks = 14` / `35` → 5 / 11

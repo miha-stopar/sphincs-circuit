@@ -207,15 +207,44 @@ pub fn setup(num_steps: usize) -> (FoldProverKey, FoldVerifierKey) {
 }
 
 /// Fold `steps` and produce a Spartan2 zk proof.
+///
+/// `is_small = true` selects the small-scalar commitment path (valid only when
+/// **every** committed witness element fits in a machine word, e.g. `u32`-limbed
+/// shared buses). Use [`fold_and_prove_general`] for circuits whose shared/witness
+/// columns hold wide field elements (e.g. the `thash`-F `addr/in/out` bus).
+pub fn fold_and_prove_with<S, C2>(
+    pk: &FoldProverKey,
+    steps: &[S],
+    core: &C2,
+    is_small: bool,
+) -> FoldProof
+where
+    S: SpartanCircuit<E>,
+    C2: SpartanCircuit<E>,
+{
+    let prep = NeutronNovaZkSNARK::<E>::prep_prove(pk, steps, core, is_small).expect("prep_prove");
+    let (proof, _prep_back) =
+        NeutronNovaZkSNARK::<E>::prove(pk, steps, core, prep, is_small).expect("prove");
+    proof
+}
+
+/// Fold `steps` with the small-scalar commitment path (`is_small = true`).
 pub fn fold_and_prove<S, C2>(pk: &FoldProverKey, steps: &[S], core: &C2) -> FoldProof
 where
     S: SpartanCircuit<E>,
     C2: SpartanCircuit<E>,
 {
-    let prep = NeutronNovaZkSNARK::<E>::prep_prove(pk, steps, core, true).expect("prep_prove");
-    let (proof, _prep_back) =
-        NeutronNovaZkSNARK::<E>::prove(pk, steps, core, prep, true).expect("prove");
-    proof
+    fold_and_prove_with(pk, steps, core, true)
+}
+
+/// Fold `steps` with the general commitment path (`is_small = false`); required
+/// when committed witness columns hold wide field elements.
+pub fn fold_and_prove_general<S, C2>(pk: &FoldProverKey, steps: &[S], core: &C2) -> FoldProof
+where
+    S: SpartanCircuit<E>,
+    C2: SpartanCircuit<E>,
+{
+    fold_and_prove_with(pk, steps, core, false)
 }
 
 /// Verify a folded proof for `num_steps` step instances.

@@ -69,9 +69,10 @@ pub use thash::{
     thash_preimage, witness_bytes_from_bits, ThashStats,
 };
 pub use thash_link::{
-    alloc_thash_f_bus, alloc_thash_f_slot, gen_chain_linked, seeded_state, thash_f_block,
-    thash_f_chain_bus_values, thash_f_core_link, thash_f_full_digest, thash_f_out, thash_f_step,
-    ThashFBusValue, F_PREIMAGE_BYTES, THASH_F_SLOT_LEN,
+    alloc_thash_f_bus, alloc_thash_f_slot, enforce_num_eq_be_bits, gen_chain_linked,
+    scalar_from_be_bytes, seeded_state, thash_f_block, thash_f_chain_bus_values, thash_f_core_link,
+    thash_f_full_digest, thash_f_out, thash_f_step, thash_f_step_values, ThashFBusValue,
+    F_PREIMAGE_BYTES, THASH_F_SLOT_LEN,
 };
 pub use verify::{
     enforce_message_padding, enforce_message_padding_witness, synthesize_verify_core,

@@ -79,7 +79,7 @@ pub use thash_link::{
     thash_f_chain_bus_values, thash_f_core_link, thash_f_full_digest, thash_f_out, thash_f_step,
     thash_f_step_values, thash_h_block, thash_h_core_link, thash_h_out, thash_h_step,
     thash_h_step_values, thash_m_bus_len, thash_m_bus_value, thash_m_compression_count,
-    thash_m_core_link, thash_m_out, thash_m_synthesize_steps, thash_m_step,
+    thash_m_core_link, thash_m_link_count, thash_m_out, thash_m_padded_blocks, thash_m_synthesize_steps, thash_m_step,
     thash_m_variable_compression_count, ThashFBusValue, ThashHBusValue, ThashMBusValue,
     FORS_PK_INBLOCKS, F_PREIMAGE_BYTES, H_PREIMAGE_BYTES, THASH_F_SLOT_LEN, THASH_H_SLOT_LEN,
     WOTS_PK_INBLOCKS,
@@ -89,8 +89,10 @@ pub use verify::{
     synthesize_verify_core_offloaded, synthesize_verify_core_public,
     synthesize_verify_core_public_with_trace, synthesize_verify_core_with_trace,
     synthesize_verify_core_wots_linked, verify_core_fors_f_bus_len, verify_core_fors_h_bus_len,
-    verify_core_fors_pk_m_bus_len, verify_core_hypertree_h_bus_len, verify_core_wots_bus_len,
-    verify_core_wots_pk_m_bus_len, VerifyCoreBuses, SPX_D,
+    verify_core_fors_pk_m_bus_len, verify_core_hypertree_h_bus_len, verify_core_offload_shared_len,
+    verify_core_offload_thash_shared_len, verify_core_wots_bus_len, verify_core_wots_pk_m_bus_len,
+    alloc_verify_core_offload_shared, verify_core_buses_from_offload_shared, VerifyCoreBuses,
+    VerifyCoreOffloadWitness, SPX_D,
     SIG_AFTER_FORS, SIG_R_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
 };
 pub use verify_public_io::{

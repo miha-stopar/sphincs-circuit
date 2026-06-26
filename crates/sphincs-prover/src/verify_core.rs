@@ -51,11 +51,13 @@ use sphincs_circuit::{
     enforce_public_matches_pk_message, enforce_public_inactive_chunks_zero,
     enforce_public_inactive_chunks_zero_variable, enforce_public_mlen_in_range,
     synthesize_hash_message_parsed_public,
-    synthesize_hash_message, synthesize_verify_core, synthesize_verify_core_public,
+    synthesize_hash_message, synthesize_verify_core, synthesize_verify_core_offloaded,
+    synthesize_verify_core_public,
     synthesize_verify_core_public_with_trace, synthesize_verify_core_with_trace,
     synthesize_hash_message_with_trace,
+    alloc_verify_core_offload_shared, verify_core_buses_from_offload_shared,
     hash_msg::SPX_DGST_BYTES, thash::SPX_N, step::StepInput,
-    HashMessageTraceInputs,
+    HashMessageTraceInputs, VerifyCoreOffloadWitness,
 };
 
 use crate::fold::E;
@@ -72,6 +74,8 @@ pub enum VerifyCorePhase {
     HashMessage,
     /// Phase 2b: entire [`synthesize_verify_core`] (hash_message → FORS → 7× hypertree → root).
     Full,
+    /// Phase 2d: fully offloaded `thash` buses (F/H/M) + in-core `hash_message` only.
+    Offloaded,
 }
 
 /// Pin each `link_digests[k]` (trace bytes) to the corresponding shared link variables.
@@ -135,6 +139,8 @@ pub struct FoldVerifyCoreCircuit {
     /// When true with `public_io`, public `mlen` is not tied to a synthesis-time constant.
     /// `hash_message` seed-SHA should use [`Self::with_hash_message_trace`] (folded compressions).
     pub variable_public_mlen: bool,
+    /// Bus witness for [`VerifyCorePhase::Offloaded`].
+    pub offload: Option<VerifyCoreOffloadWitness>,
     _p: PhantomData<Scalar>,
 }
 
@@ -161,6 +167,7 @@ impl FoldVerifyCoreCircuit {
             hash_message_trace: None,
             public_io: false,
             variable_public_mlen: false,
+            offload: None,
             _p: PhantomData,
         }
     }
@@ -238,6 +245,7 @@ impl FoldVerifyCoreCircuit {
             hash_message_trace: None,
             public_io: false,
             variable_public_mlen: false,
+            offload: None,
             _p: PhantomData,
         }
     }
@@ -245,6 +253,35 @@ impl FoldVerifyCoreCircuit {
     /// Number of step↔step link digests (= `link_digests.len()` = shared columns / 8).
     pub fn num_links(&self) -> usize {
         self.link_digests.len()
+    }
+
+    /// Phase 2d: [`synthesize_verify_core_offloaded`] — all `thash` offloaded except `hash_message`.
+    pub fn offloaded(
+        pk: [u8; SPHINCS_PK_BYTES],
+        message: [u8; MESSAGE_MAX_BYTES],
+        mlen: usize,
+        signature: [u8; SPHINCS_SIG_BYTES],
+        r: [u8; SPX_N],
+        hm_mgf: [u8; SPX_DGST_BYTES],
+        link_digests: Vec<[u8; 32]>,
+        offload: VerifyCoreOffloadWitness,
+    ) -> Self {
+        assert!(mlen <= MESSAGE_MAX_BYTES);
+        Self {
+            phase: VerifyCorePhase::Offloaded,
+            pk,
+            message,
+            mlen,
+            r,
+            hm_mgf,
+            signature: Some(signature),
+            link_digests,
+            hash_message_trace: None,
+            public_io: false,
+            variable_public_mlen: false,
+            offload: Some(offload),
+            _p: PhantomData,
+        }
     }
 }
 
@@ -282,7 +319,19 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
         &self,
         cs: &mut CS,
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
-        alloc_all_link_digests(cs.namespace(|| "core_shared_links"), &self.link_digests)
+        if self.phase == VerifyCorePhase::Offloaded {
+            let offload = self
+                .offload
+                .as_ref()
+                .ok_or(SynthesisError::AssignmentMissing)?;
+            alloc_verify_core_offload_shared(
+                cs.namespace(|| "offload_shared"),
+                &self.link_digests,
+                offload,
+            )
+        } else {
+            alloc_all_link_digests(cs.namespace(|| "core_shared_links"), &self.link_digests)
+        }
     }
 
     fn precommitted<CS: ConstraintSystem<Scalar>>(
@@ -501,6 +550,35 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                         &self.link_digests,
                     )?;
                 }
+            }
+            VerifyCorePhase::Offloaded => {
+                let signature = self
+                    .signature
+                    .as_ref()
+                    .ok_or(SynthesisError::AssignmentMissing)?;
+                let offload = self
+                    .offload
+                    .as_ref()
+                    .ok_or(SynthesisError::AssignmentMissing)?;
+                enforce_message_padding(
+                    cs.namespace(|| "msg_pad"),
+                    &self.message,
+                    self.mlen,
+                )?;
+                let buses = verify_core_buses_from_offload_shared(
+                    shared,
+                    self.link_digests.len(),
+                    offload,
+                );
+                synthesize_verify_core_offloaded(
+                    cs.namespace(|| "verify_core_offloaded"),
+                    &self.pk,
+                    &self.message,
+                    self.mlen,
+                    signature,
+                    &self.hm_mgf,
+                    &buses,
+                )?;
             }
         }
 

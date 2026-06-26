@@ -28,12 +28,15 @@
 
 use circuit_spec::{MESSAGE_MAX_BYTES, SPHINCS_PK_BYTES, SPHINCS_SIG_BYTES};
 use sphincs_circuit::{
+    fors::fors_pk_bus_values,
     fors::SPX_FORS_BYTES,
-    hash_message_mgf_buf, hash_msg::HashMessageOutput, thash::SPX_N,
+    hash_message_mgf_buf, hash_msg::HashMessageOutput, hypertree::SPX_TREE_AUTH_BYTES,
+    hypertree::SPX_TREE_HEIGHT, hypertree::wots_pk_leaf_m_bus_value,
+    merkle::compute_root_h_bus_values, thash::SPX_N, thash_link::ThashMBusValue,
+    wots::wots_pk_bus_values, VerifyCoreOffloadWitness,
     SPX_D, SPX_WOTS_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
     SIG_AFTER_FORS, SIG_R_BYTES,
 };
-use sphincs_circuit::hypertree::SPX_TREE_AUTH_BYTES;
 
 use crate::verify_core::{padded_message, sig_r, FoldVerifyCoreCircuit};
 
@@ -153,6 +156,117 @@ pub fn fold_verify_core_from_pqclean(
         r,
         hm_mgf,
         link_digests,
+    )
+}
+
+/// Collect native offloaded `thash` bus values for a PQClean KAT (mirrors
+/// `sphincs_circuit::verify::tests::valid_signature_satisfies_core_offloaded`).
+#[cfg(feature = "pqclean")]
+pub fn offload_witness_from_pqclean(
+    pk: &[u8; SPHINCS_PK_BYTES],
+    sig: &[u8; SPHINCS_SIG_BYTES],
+    hm: &HashMessageOutput,
+) -> VerifyCoreOffloadWitness {
+    let pub_seed = {
+        let mut s = [0u8; SPX_N];
+        s.copy_from_slice(&pk[..SPX_N]);
+        s
+    };
+
+    let mut tree = hm.tree;
+    let mut idx_leaf = hm.leaf_idx;
+
+    let mut fors_addr = [0u8; 22];
+    fors_addr[9] = SPX_ADDR_TYPE_WOTS;
+    fors_addr[1..9].copy_from_slice(&tree.to_be_bytes());
+    fors_addr[12] = (idx_leaf >> 8) as u8;
+    fors_addr[13] = idx_leaf as u8;
+
+    let mut fors_sig = [0u8; SPX_FORS_BYTES];
+    fors_sig.copy_from_slice(&sig[SIG_R_BYTES..SIG_AFTER_FORS]);
+
+    let (fors_f, fors_h, fors_pk_m) =
+        fors_pk_bus_values(&pub_seed, &fors_addr, &fors_sig, &hm.mhash);
+    let mut root = sphincs_ref::fors_pk_from_sig_oracle(&pub_seed, &fors_addr, &fors_sig, &hm.mhash);
+
+    let mut sig_off = SIG_AFTER_FORS;
+    let mut wots = Vec::new();
+    let mut wots_pk_m: Vec<ThashMBusValue> = Vec::new();
+    let mut merkle_h = Vec::new();
+
+    for layer in 0..SPX_D {
+        let mut wots_addr = [0u8; 22];
+        wots_addr[9] = SPX_ADDR_TYPE_WOTS;
+        wots_addr[0] = layer as u8;
+        wots_addr[1..9].copy_from_slice(&tree.to_be_bytes());
+        wots_addr[12] = (idx_leaf >> 8) as u8;
+        wots_addr[13] = idx_leaf as u8;
+
+        let mut tree_addr = [0u8; 22];
+        tree_addr[0] = layer as u8;
+        tree_addr[1..9].copy_from_slice(&tree.to_be_bytes());
+        tree_addr[9] = SPX_ADDR_TYPE_HASHTREE;
+
+        let mut wots_pk_addr = [0u8; 22];
+        wots_pk_addr[..9].copy_from_slice(&tree_addr[..9]);
+        wots_pk_addr[12] = (idx_leaf >> 8) as u8;
+        wots_pk_addr[13] = idx_leaf as u8;
+        wots_pk_addr[9] = SPX_ADDR_TYPE_WOTSPK;
+
+        let mut sig_wots = [0u8; SPX_WOTS_BYTES];
+        sig_wots.copy_from_slice(&sig[sig_off..sig_off + SPX_WOTS_BYTES]);
+        sig_off += SPX_WOTS_BYTES;
+        let auth = &sig[sig_off..sig_off + SPX_TREE_AUTH_BYTES];
+        sig_off += SPX_TREE_AUTH_BYTES;
+
+        wots.extend(wots_pk_bus_values(&pub_seed, &wots_addr, &sig_wots, &root));
+
+        let wots_pk =
+            sphincs_ref::wots_pk_from_sig_oracle(&pub_seed, &wots_addr, &sig_wots, &root);
+        wots_pk_m.push(wots_pk_leaf_m_bus_value(&pub_seed, &wots_pk_addr, &wots_pk));
+        let leaf = sphincs_ref::thash_oracle(&pub_seed, &wots_pk_addr, &wots_pk);
+        let (h_vals, layer_root) = compute_root_h_bus_values(
+            &pub_seed, &tree_addr, &leaf, idx_leaf, 0, auth, SPX_TREE_HEIGHT,
+        );
+        merkle_h.extend(h_vals);
+        root = layer_root;
+        idx_leaf = (tree & ((1u64 << SPX_TREE_HEIGHT) - 1)) as u32;
+        tree >>= SPX_TREE_HEIGHT;
+    }
+
+    VerifyCoreOffloadWitness {
+        fors_f,
+        fors_h,
+        fors_pk_m,
+        wots,
+        wots_pk_m,
+        merkle_h,
+    }
+}
+
+/// Build a Phase Offloaded [`FoldVerifyCoreCircuit`] from a PQClean KAT.
+#[cfg(feature = "pqclean")]
+pub fn fold_verify_core_offloaded_from_pqclean(
+    pk: [u8; SPHINCS_PK_BYTES],
+    sig: [u8; SPHINCS_SIG_BYTES],
+    msg: &[u8],
+    link_digests: Vec<[u8; 32]>,
+    hm: &HashMessageOutput,
+) -> FoldVerifyCoreCircuit {
+    assert!(msg.len() <= MESSAGE_MAX_BYTES);
+    let (message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+    let offload = offload_witness_from_pqclean(&pk, &sig, hm);
+    FoldVerifyCoreCircuit::offloaded(
+        pk,
+        message,
+        mlen,
+        sig,
+        r,
+        hm_mgf,
+        link_digests,
+        offload,
     )
 }
 

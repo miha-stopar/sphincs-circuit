@@ -38,8 +38,10 @@ use crate::hypertree::{
     SPX_TREE_HEIGHT,
 };
 use crate::thash::{enforce_bits_equal_bytes, witness_bytes_from_bits, ADDR_BYTES, SPX_N};
+use crate::shared_link::DIGEST_WORDS;
 use crate::thash_link::{
-    thash_m_bus_len, FORS_PK_INBLOCKS, THASH_F_SLOT_LEN, THASH_H_SLOT_LEN, WOTS_PK_INBLOCKS,
+    thash_m_bus_len, ThashFBusValue, ThashHBusValue, ThashMBusValue, FORS_PK_INBLOCKS,
+    THASH_F_SLOT_LEN, THASH_H_SLOT_LEN, WOTS_PK_INBLOCKS,
 };
 use crate::verify_public_io::InputizedVerifyPublic;
 use crate::wots::{wots_step_count, SPX_WOTS_BYTES};
@@ -781,6 +783,111 @@ where
         &hm,
         buses,
     )
+}
+
+/// Native bus values for [`synthesize_verify_core_offloaded`] / NeutronNova shared witness.
+#[derive(Clone, Debug)]
+pub struct VerifyCoreOffloadWitness {
+    pub fors_f: Vec<ThashFBusValue>,
+    pub fors_h: Vec<ThashHBusValue>,
+    pub fors_pk_m: ThashMBusValue,
+    pub wots: Vec<ThashFBusValue>,
+    pub wots_pk_m: Vec<ThashMBusValue>,
+    pub merkle_h: Vec<ThashHBusValue>,
+}
+
+/// Field elements for all offloaded `thash` buses (excludes `hash_message` link digests).
+pub fn verify_core_offload_thash_shared_len(w: &VerifyCoreOffloadWitness) -> usize {
+    verify_core_fors_f_bus_len()
+        + verify_core_fors_h_bus_len()
+        + verify_core_fors_pk_m_bus_len()
+        + w.wots.len() * THASH_F_SLOT_LEN
+        + verify_core_wots_pk_m_bus_len()
+        + verify_core_hypertree_h_bus_len()
+}
+
+/// Total shared columns: `hash_message` links + all `thash` buses.
+pub fn verify_core_offload_shared_len(num_links: usize, w: &VerifyCoreOffloadWitness) -> usize {
+    num_links * DIGEST_WORDS + verify_core_offload_thash_shared_len(w)
+}
+
+/// Allocate link digests + all offloaded `thash` buses in the layout expected by
+/// [`verify_core_buses_from_offload_shared`].
+pub fn alloc_verify_core_offload_shared<Scalar, CS>(
+    mut cs: CS,
+    link_digests: &[[u8; 32]],
+    witness: &VerifyCoreOffloadWitness,
+) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    use crate::shared_link::alloc_digest_shared;
+    use crate::thash_link::{alloc_thash_f_bus, alloc_thash_h_bus, alloc_thash_m_bus};
+
+    let mut shared =
+        Vec::with_capacity(verify_core_offload_shared_len(link_digests.len(), witness));
+    for (k, digest) in link_digests.iter().enumerate() {
+        shared.extend(alloc_digest_shared(
+            cs.namespace(|| format!("link_{k}")),
+            "link",
+            *digest,
+        )?);
+    }
+    shared.extend(alloc_thash_f_bus(
+        cs.namespace(|| "fors_f"),
+        &witness.fors_f,
+    )?);
+    shared.extend(alloc_thash_h_bus(
+        cs.namespace(|| "fors_h"),
+        &witness.fors_h,
+    )?);
+    shared.extend(alloc_thash_m_bus(
+        cs.namespace(|| "fors_pk_m"),
+        &witness.fors_pk_m,
+    )?);
+    shared.extend(alloc_thash_f_bus(cs.namespace(|| "wots"), &witness.wots)?);
+    for (i, v) in witness.wots_pk_m.iter().enumerate() {
+        shared.extend(alloc_thash_m_bus(
+            cs.namespace(|| format!("wots_pk_m_{i}")),
+            v,
+        )?);
+    }
+    shared.extend(alloc_thash_h_bus(
+        cs.namespace(|| "merkle_h"),
+        &witness.merkle_h,
+    )?);
+    Ok(shared)
+}
+
+/// Slice [`alloc_verify_core_offload_shared`] output into [`VerifyCoreBuses`].
+pub fn verify_core_buses_from_offload_shared<'a, Scalar: ff::PrimeField>(
+    shared: &'a [AllocatedNum<Scalar>],
+    num_links: usize,
+    witness: &VerifyCoreOffloadWitness,
+) -> VerifyCoreBuses<'a, Scalar> {
+    let mut cursor = num_links * DIGEST_WORDS;
+    let mut take = |len: usize| {
+        let slice = &shared[cursor..cursor + len];
+        cursor += len;
+        slice
+    };
+    let fors_f = take(verify_core_fors_f_bus_len());
+    let fors_h = take(verify_core_fors_h_bus_len());
+    let fors_pk_m = take(verify_core_fors_pk_m_bus_len());
+    let wots_len = witness.wots.len() * THASH_F_SLOT_LEN;
+    let wots = take(wots_len);
+    let wots_pk_m = take(verify_core_wots_pk_m_bus_len());
+    let merkle_h = take(verify_core_hypertree_h_bus_len());
+    assert_eq!(cursor, shared.len());
+    VerifyCoreBuses {
+        fors_f,
+        fors_h,
+        fors_pk_m,
+        wots,
+        wots_pk_m,
+        merkle_h,
+    }
 }
 
 #[cfg(test)]

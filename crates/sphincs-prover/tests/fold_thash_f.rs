@@ -51,3 +51,26 @@ fn fold_thash_h_compute_root_prove_and_verify() {
     let proof = fold_and_prove_general(&pk, &step_circuits, &core);
     verify_proof(&vk, &proof, step_circuits.len());
 }
+
+/// Fold a FORS-pk `thash`-M call (4 variable compressions) and check prove + verify.
+#[test]
+fn fold_thash_m_fors_pk_prove_and_verify() {
+    use sphincs_circuit::{thash_m_variable_compression_count, FORS_PK_INBLOCKS};
+    use sphincs_prover::thash_m_single_call_fold;
+
+    let pub_seed = [0x33u8; 16];
+    let mut addr = [0u8; 22];
+    addr[9] = 3; // SPX_ADDR_TYPE_FORSPK
+    let input: Vec<u8> = (0..FORS_PK_INBLOCKS * 16).map(|i| (i % 200) as u8).collect();
+    let var_count = thash_m_variable_compression_count(FORS_PK_INBLOCKS);
+    assert_eq!(var_count, 4);
+
+    let (step_circuits, core) =
+        thash_m_single_call_fold(&pub_seed, &addr, &input, var_count);
+    assert_eq!(step_circuits.len(), 4);
+
+    let proto = &step_circuits[0];
+    let (pk, vk) = setup_with_proto(proto, &core, step_circuits.len());
+    let proof = fold_and_prove_general(&pk, &step_circuits, &core);
+    verify_proof(&vk, &proof, step_circuits.len());
+}

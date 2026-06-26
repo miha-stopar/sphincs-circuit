@@ -643,6 +643,301 @@ where
     Ok(out_bits)
 }
 
+// ===========================================================================
+// thash-M family (inblocks > 2) — multi-block thash (FORS-pk, WOTS-pk leaf).
+//
+//   thash_M(in, inblocks) = SHA256( pub_seed ‖ 0^48 ‖ addr ‖ in )[0:16]
+//
+// Block 0 (`pub_seed ‖ 0^48`) is constant `S`. The remaining compressions form a
+// chain `Compress(S, b1) → … → out`. Intermediate 32-byte states ride on the bus
+// as `DIGEST_WORDS` limbs per link (same layout as `shared_link`); the 16-byte
+// output is a 128-bit field element. Input is split into `inblocks` chunks on the
+// bus so `C_core` can bind each 16-byte slice without in-core SHA.
+// ===========================================================================
+
+use crate::hash_message_trace::sha256_compression_count_fresh;
+use crate::shared_link::{enforce_words_eq_shared, DIGEST_WORDS};
+
+/// `inblocks` for the WOTS-pk leaf `thash` (`SPX_WOTS_LEN = 35`).
+pub const WOTS_PK_INBLOCKS: usize = 35;
+/// `inblocks` for the FORS-pk horizontal `thash` (`SPX_FORS_TREES = 14`).
+pub const FORS_PK_INBLOCKS: usize = 14;
+
+/// Byte length of the unpadded `thash` preimage (seed block + addr + in).
+pub const fn thash_m_preimage_len(inblocks: usize) -> usize {
+    64 + ADDR_BYTES + inblocks * SPX_N
+}
+
+/// Total SHA-256 compressions for one `thash` with `inblocks` input blocks.
+pub const fn thash_m_compression_count(inblocks: usize) -> usize {
+    sha256_compression_count_fresh(thash_m_preimage_len(inblocks))
+}
+
+/// Variable compressions after the constant seed block.
+pub const fn thash_m_variable_compression_count(inblocks: usize) -> usize {
+    thash_m_compression_count(inblocks) - 1
+}
+
+/// Intermediate link digests on the bus (`var_compressions - 1`).
+pub const fn thash_m_link_count(inblocks: usize) -> usize {
+    thash_m_variable_compression_count(inblocks).saturating_sub(1)
+}
+
+/// Shared-witness field elements for one `thash`-M call.
+pub const fn thash_m_bus_len(inblocks: usize) -> usize {
+    1 + inblocks + thash_m_link_count(inblocks) * DIGEST_WORDS + 1
+}
+
+/// Build the fully padded SHA-256 message and return all 64-byte blocks.
+/// `blocks[0]` is the seed block; `blocks[1..]` are the variable compressions.
+pub fn thash_m_padded_blocks(
+    pub_seed: &[u8; SPX_N],
+    addr: &[u8; ADDR_BYTES],
+    input: &[u8],
+) -> Vec<[u8; 64]> {
+    assert_eq!(input.len() % SPX_N, 0);
+    assert!(!input.is_empty());
+    let mut msg = Vec::new();
+    msg.extend_from_slice(pub_seed);
+    msg.resize(64, 0u8);
+    msg.extend_from_slice(addr);
+    msg.extend_from_slice(input);
+    let bit_len = (thash_m_preimage_len(input.len() / SPX_N) as u64) * 8;
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+    assert_eq!(msg.len() % 64, 0);
+    msg.chunks(64)
+        .map(|c| {
+            let mut b = [0u8; 64];
+            b.copy_from_slice(c);
+            b
+        })
+        .collect()
+}
+
+/// Native `thash`-M output (16 bytes).
+pub fn thash_m_out(pub_seed: &[u8; SPX_N], addr: &[u8; ADDR_BYTES], input: &[u8]) -> [u8; SPX_N] {
+    let blocks = thash_m_padded_blocks(pub_seed, addr, input);
+    let mut state = state_bytes_to_words(&seeded_state(pub_seed));
+    for block in blocks.iter().skip(1) {
+        let ga = sha2::digest::generic_array::GenericArray::clone_from_slice(block);
+        sha2::compress256(&mut state, &[ga]);
+    }
+    let digest = words_to_be_bytes(&state);
+    let mut out = [0u8; SPX_N];
+    out.copy_from_slice(&digest[..SPX_N]);
+    out
+}
+
+/// One `thash`-M bus entry: addr, full input, intermediate link digests, output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThashMBusValue {
+    pub addr: [u8; ADDR_BYTES],
+    pub input: Vec<u8>,
+    pub links: Vec<[u8; 32]>,
+    pub out: [u8; SPX_N],
+}
+
+/// Simulate a `thash`-M and record bus values for every variable compression.
+pub fn thash_m_bus_value(
+    pub_seed: &[u8; SPX_N],
+    addr: &[u8; ADDR_BYTES],
+    input: &[u8],
+) -> ThashMBusValue {
+    let blocks = thash_m_padded_blocks(pub_seed, addr, input);
+    let mut state = state_bytes_to_words(&seeded_state(pub_seed));
+    let mut links = Vec::new();
+    for (i, block) in blocks.iter().skip(1).enumerate() {
+        let ga = sha2::digest::generic_array::GenericArray::clone_from_slice(block);
+        sha2::compress256(&mut state, &[ga]);
+        let digest = words_to_be_bytes(&state);
+        if i < blocks.len() - 2 {
+            links.push(digest);
+        }
+    }
+    let mut out = [0u8; SPX_N];
+    out.copy_from_slice(&words_to_be_bytes(&state)[..SPX_N]);
+    ThashMBusValue {
+        addr: *addr,
+        input: input.to_vec(),
+        links,
+        out,
+    }
+}
+
+/// Allocate one `thash`-M bus (`thash_m_bus_len(inblocks)` field elements).
+pub fn alloc_thash_m_bus<Scalar, CS>(
+    mut cs: CS,
+    value: &ThashMBusValue,
+) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let inblocks = value.input.len() / SPX_N;
+    assert_eq!(value.links.len(), thash_m_link_count(inblocks));
+    let mut bus = Vec::with_capacity(thash_m_bus_len(inblocks));
+    bus.push(AllocatedNum::alloc(cs.namespace(|| "addr"), || {
+        Ok(scalar_from_be_bytes(&value.addr))
+    })?);
+    for (i, chunk) in value.input.chunks(SPX_N).enumerate() {
+        let mut c = [0u8; SPX_N];
+        c.copy_from_slice(chunk);
+        bus.push(AllocatedNum::alloc(cs.namespace(|| format!("in_{i}")), || {
+            Ok(scalar_from_be_bytes(&c))
+        })?);
+    }
+    for (k, link) in value.links.iter().enumerate() {
+        bus.extend(crate::shared_link::alloc_digest_shared(
+            cs.namespace(|| format!("link_{k}")),
+            "w",
+            *link,
+        )?);
+    }
+    bus.push(AllocatedNum::alloc(cs.namespace(|| "out"), || {
+        Ok(scalar_from_be_bytes(&value.out))
+    })?);
+    Ok(bus)
+}
+
+fn thash_m_link_slice<'a, Scalar: PrimeField>(
+    bus: &'a [AllocatedNum<Scalar>],
+    inblocks: usize,
+    link_index: usize,
+) -> &'a [AllocatedNum<Scalar>] {
+    let base = 1 + inblocks + link_index * DIGEST_WORDS;
+    &bus[base..base + DIGEST_WORDS]
+}
+
+/// Folded **`C_step`** for one variable compression of a `thash`-M chain.
+///
+/// `step_index` is `0 .. thash_m_variable_compression_count(inblocks)`.
+/// `block` is the native 64-byte SHA block for this compression (honest synthesis
+/// passes the value from [`thash_m_padded_blocks`]).
+pub fn thash_m_step<Scalar, CS>(
+    mut cs: CS,
+    seeded: &[u8; 32],
+    block: &[u8; 64],
+    step_index: usize,
+    inblocks: usize,
+    bus: &[AllocatedNum<Scalar>],
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let var_count = thash_m_variable_compression_count(inblocks);
+    assert!(step_index < var_count);
+    assert_eq!(bus.len(), thash_m_bus_len(inblocks));
+
+    let h_in_words: Vec<UInt32> = if step_index == 0 {
+        state_bytes_to_words(seeded)
+            .iter()
+            .map(|&w| UInt32::constant(w))
+            .collect()
+    } else {
+        let link = thash_m_link_slice(bus, inblocks, step_index - 1);
+        let words = link
+            .iter()
+            .enumerate()
+            .map(|(i, num)| {
+                let w = num
+                    .get_value()
+                    .map(|s| {
+                        let b = scalar_low_be_bytes::<Scalar, 4>(&s);
+                        u32::from_be_bytes(b)
+                    })
+                    .unwrap_or(0);
+                UInt32::alloc(cs.namespace(|| format!("h_in_w{i}")), Some(w))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        enforce_words_eq_shared(
+            cs.namespace(|| "h_in_link"),
+            "in",
+            &words,
+            link,
+        )?;
+        words
+    };
+
+    let block_bits = alloc_byte_bits(&mut cs.namespace(|| "block"), "b", block)?;
+    let out_words =
+        sha256_compression_function(cs.namespace(|| "compress"), &block_bits, &h_in_words)?;
+
+    if step_index < var_count - 1 {
+        enforce_words_eq_shared(
+            cs.namespace(|| "link_out"),
+            "out",
+            &out_words,
+            thash_m_link_slice(bus, inblocks, step_index),
+        )?;
+    } else {
+        let out_bits: Vec<Boolean> = sha256_state_words_to_bits_be(&out_words[..4]);
+        enforce_num_eq_be_bits(cs.namespace(|| "bind_out"), &bus[bus.len() - 1], &out_bits)?;
+    }
+    Ok(())
+}
+
+/// **`C_core`** glue for one `thash`-M: bind `addr` + `in_bits` to the bus, return `out`.
+pub fn thash_m_core_link<Scalar, CS>(
+    mut cs: CS,
+    addr_const: &[u8; ADDR_BYTES],
+    in_bits: &[Boolean],
+    inblocks: usize,
+    bus: &[AllocatedNum<Scalar>],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    assert_eq!(in_bits.len(), inblocks * SPX_N * 8);
+    assert_eq!(bus.len(), thash_m_bus_len(inblocks));
+
+    let addr_bits = const_byte_bits(addr_const);
+    enforce_num_eq_be_bits(cs.namespace(|| "bind_addr"), &bus[0], &addr_bits)?;
+    for (i, chunk) in in_bits.chunks(SPX_N * 8).enumerate() {
+        enforce_num_eq_be_bits(cs.namespace(|| format!("bind_in_{i}")), &bus[1 + i], chunk)?;
+    }
+
+    let out_val: [u8; SPX_N] = bus[bus.len() - 1]
+        .get_value()
+        .map(|s| scalar_low_be_bytes::<Scalar, SPX_N>(&s))
+        .unwrap_or([0u8; SPX_N]);
+    let out_bits = alloc_byte_bits(&mut cs.namespace(|| "out"), "b", &out_val)?;
+    enforce_num_eq_be_bits(cs.namespace(|| "bind_out"), &bus[bus.len() - 1], &out_bits)?;
+    Ok(out_bits)
+}
+
+/// Synthesize all folded `C_step` bodies for one `thash`-M bus entry.
+pub fn thash_m_synthesize_steps<Scalar, CS>(
+    mut cs: CS,
+    pub_seed: &[u8; SPX_N],
+    value: &ThashMBusValue,
+    bus: &[AllocatedNum<Scalar>],
+) -> Result<(), SynthesisError>
+where
+    Scalar: PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let inblocks = value.input.len() / SPX_N;
+    let blocks = thash_m_padded_blocks(pub_seed, &value.addr, &value.input);
+    let seeded = seeded_state(pub_seed);
+    for (i, block) in blocks.iter().skip(1).enumerate() {
+        thash_m_step(
+            cs.namespace(|| format!("step_{i}")),
+            &seeded,
+            block,
+            i,
+            inblocks,
+            bus,
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1028,6 +1323,55 @@ mod tests {
             let slot = alloc_thash_h_slot(cs.namespace(|| "slot"), &value).unwrap();
             thash_h_step(cs.namespace(|| "step"), &seeded, &ad, &in0, &in1, &slot).unwrap();
             assert!(!cs.is_satisfied(), "out mismatch must not satisfy");
+        }
+    }
+
+    // ===================== thash-M (multi-block) =========================
+
+    #[test]
+    fn thash_m_native_matches_in_core_thash() {
+        let ps = pub_seed();
+        let ad = addr();
+        for inblocks in [FORS_PK_INBLOCKS, WOTS_PK_INBLOCKS] {
+            let input: Vec<u8> = (0..inblocks * SPX_N).map(|i| (i % 251) as u8).collect();
+            let reference = {
+                let mut cs = SatCheckCS::<Fr>::new();
+                let in_bits = alloc_input_bits(&mut cs, "in", &input).unwrap();
+                let digest = thash_digest_bits(cs.namespace(|| "t"), &ps, &ad, &in_bits).unwrap();
+                witness_bytes_from_bits::<SPX_N>(&digest)
+            };
+            assert_eq!(thash_m_out(&ps, &ad, &input), reference, "inblocks={inblocks}");
+        }
+    }
+
+    #[test]
+    fn thash_m_offload_matches_in_core() {
+        for inblocks in [FORS_PK_INBLOCKS, WOTS_PK_INBLOCKS] {
+            let ps = pub_seed();
+            let ad = addr();
+            let input: Vec<u8> = (0..inblocks * SPX_N).map(|i| (i % 251) as u8).collect();
+
+            let reference = {
+                let mut cs = SatCheckCS::<Fr>::new();
+                let in_bits = alloc_input_bits(&mut cs, "in", &input).unwrap();
+                let digest = thash_digest_bits(cs.namespace(|| "t"), &ps, &ad, &in_bits).unwrap();
+                witness_bytes_from_bits::<SPX_N>(&digest)
+            };
+
+            let value = thash_m_bus_value(&ps, &ad, &input);
+            let mut cs = SatCheckCS::<Fr>::new();
+            let bus = alloc_thash_m_bus(cs.namespace(|| "bus"), &value).unwrap();
+            let in_bits = alloc_input_bits(&mut cs.namespace(|| "in"), "v", &input).unwrap();
+            let out_bits =
+                thash_m_core_link(cs.namespace(|| "core"), &ad, &in_bits, inblocks, &bus).unwrap();
+            thash_m_synthesize_steps(cs.namespace(|| "steps"), &ps, &value, &bus).unwrap();
+
+            assert!(
+                cs.is_satisfied(),
+                "thash-M offload inblocks={inblocks} unsatisfied at {:?}",
+                cs.first_unsatisfied_path()
+            );
+            assert_eq!(witness_bytes_from_bits::<SPX_N>(&out_bits), reference);
         }
     }
 }

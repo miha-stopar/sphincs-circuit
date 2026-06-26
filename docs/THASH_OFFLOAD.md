@@ -38,16 +38,17 @@ constraints in one `C_core`" / "trace-link FORS / WOTS / hypertree too").
   the in-core relations by `compute_root_offload_matches_in_core` (merkle),
   `fors_offload_matches_in_core` (fors), and `h_*` tests (thash_link). The H fold
   proves+verifies through `spartan2` (`fold_thash_h_compute_root_prove_and_verify`).
-- **Done — full single-block offload in the verify core:**
-  `synthesize_verify_core_offloaded` (in `verify.rs`) threads **four** buses
-  (FORS-F, FORS-H, WOTS-F, Merkle-H) and offloads *every* single-block `thash`.
-  Validated on a real PQClean KAT by `valid_signature_satisfies_core_offloaded`.
-  This covers ~245 of the ~253 remaining compressions; only the **8 multi-block**
-  calls (7 WOTS-pk leaf `thash`es + 1 FORS-pk horizontal `thash`) and
-  `hash_message` stay in-core.
-- **Next increment:** offload the two multi-block families (WOTS-pk `inblocks=35`,
-  FORS-pk `inblocks=14`) by chaining intermediate-state slots, and drive all four
-  buses + the link digests through one `comm_W_shared` in a single fold proof.
+- **Done — full thash offload in verify core:**
+  `synthesize_verify_core_offloaded` threads **six** buses (FORS-F, FORS-H, FORS-pk-M,
+  WOTS-F, WOTS-pk-M × 7 layers, Merkle-H) and offloads **every `thash` except
+  `hash_message`**. Validated on a real PQClean KAT by
+  `valid_signature_satisfies_core_offloaded` (~30s release).
+- **Done — multi-block `thash`-M** (FORS-pk `inblocks=14` → 4 variable compressions,
+  WOTS-pk `inblocks=35` → 10): chained compressions with intermediate digest links on
+  the bus (`thash_m_*` in `thash_link.rs`). Tests: `thash_m_offload_matches_in_core`,
+  integrated in `fors_offload_matches_in_core` and the capstone verify test.
+- **Next increment:** drive all six buses + `hash_message` link digests through one
+  `comm_W_shared` in a single NeutronNova fold proof; add `thash_m` prover fold.
 
 ## Why the existing trace-linking did not offload anything
 
@@ -220,13 +221,9 @@ WOTS / FORS / Merkle / verify-core helpers:
    Merkle layers).~~ **Done** — both `inblocks ∈ {1, 2}` are single variable
    compressions, offloaded via the F and H buses and composed in
    `synthesize_verify_core_offloaded`.
-4. **Multi-block families** (FORS-pk `inblocks = 14` → 5 compressions, WOTS-pk
-   `inblocks = 35` → 11 compressions). These span several blocks, so they need a
-   *chain* of compression steps that share intermediate SHA-256 state boundaries:
-   pin only the first constant `S`, then carry each block's `h_out` to the next
-   block's `h_in` over the bus. The `in`/`out` slot widths stay 128-bit; the
-   intermediate boundaries can reuse `shared_link`'s `8×u32` digest slots. Only 8
-   such calls remain per signature.
-5. **One proof.** Drive all four single-block buses + the multi-block boundaries +
-   the `link_digests` through one `comm_W_shared` so the entire verify core folds in
-   a single NeutronNova proof.
+4. ~~**Multi-block families** (FORS-pk `inblocks = 14`, WOTS-pk `inblocks = 35`).~~
+   **Done** — `thash_m_*` chains variable compressions with digest links on the bus;
+   wired through FORS pk and WOTS-pk leaf in `synthesize_verify_core_offloaded`.
+5. **One proof.** Drive all six buses + `hash_message` link digests through one
+   `comm_W_shared` so the entire verify core folds in a single NeutronNova proof;
+   add `thash_m` prover fold (`FoldThashMStepCircuit`).

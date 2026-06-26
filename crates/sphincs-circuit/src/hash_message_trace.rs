@@ -32,7 +32,7 @@ const SHA256_IV: [u32; 8] = [
 ];
 
 /// Number of SHA-256 compressions for one-shot digest of `byte_len` bytes from the IV.
-pub fn sha256_compression_count_fresh(byte_len: usize) -> usize {
+pub const fn sha256_compression_count_fresh(byte_len: usize) -> usize {
     let mut total = byte_len + 1 + 8;
     while total % 64 != 0 {
         total += 1;

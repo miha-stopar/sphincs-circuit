@@ -51,7 +51,8 @@ pub use hash_message_trace::{
 };
 pub use hypertree::{
     hypertree_layer_bits, hypertree_layer_from_root_bits, hypertree_layer_from_root_bits_linked,
-    hypertree_layer_from_root_bits_offloaded, synthesize_hypertree_layer, SPX_TREE_HEIGHT,
+    hypertree_layer_from_root_bits_offloaded, synthesize_hypertree_layer,
+    wots_pk_leaf_m_bus_value, SPX_TREE_HEIGHT,
 };
 pub use merkle::{
     addr_with_height_index, compute_root_bits, compute_root_bits_linked, compute_root_h_bus_values,
@@ -73,19 +74,23 @@ pub use thash::{
     thash_preimage, witness_bytes_from_bits, ThashStats,
 };
 pub use thash_link::{
-    alloc_thash_f_bus, alloc_thash_f_slot, alloc_thash_h_bus, alloc_thash_h_slot,
+    alloc_thash_f_bus, alloc_thash_f_slot, alloc_thash_h_bus, alloc_thash_h_slot, alloc_thash_m_bus,
     enforce_num_eq_be_bits, gen_chain_linked, scalar_from_be_bytes, seeded_state, thash_f_block,
     thash_f_chain_bus_values, thash_f_core_link, thash_f_full_digest, thash_f_out, thash_f_step,
     thash_f_step_values, thash_h_block, thash_h_core_link, thash_h_out, thash_h_step,
-    thash_h_step_values, ThashFBusValue, ThashHBusValue, F_PREIMAGE_BYTES, H_PREIMAGE_BYTES,
-    THASH_F_SLOT_LEN, THASH_H_SLOT_LEN,
+    thash_h_step_values, thash_m_bus_len, thash_m_bus_value, thash_m_compression_count,
+    thash_m_core_link, thash_m_out, thash_m_synthesize_steps, thash_m_step,
+    thash_m_variable_compression_count, ThashFBusValue, ThashHBusValue, ThashMBusValue,
+    FORS_PK_INBLOCKS, F_PREIMAGE_BYTES, H_PREIMAGE_BYTES, THASH_F_SLOT_LEN, THASH_H_SLOT_LEN,
+    WOTS_PK_INBLOCKS,
 };
 pub use verify::{
     enforce_message_padding, enforce_message_padding_witness, synthesize_verify_core,
     synthesize_verify_core_offloaded, synthesize_verify_core_public,
     synthesize_verify_core_public_with_trace, synthesize_verify_core_with_trace,
     synthesize_verify_core_wots_linked, verify_core_fors_f_bus_len, verify_core_fors_h_bus_len,
-    verify_core_hypertree_h_bus_len, verify_core_wots_bus_len, VerifyCoreBuses, SPX_D,
+    verify_core_fors_pk_m_bus_len, verify_core_hypertree_h_bus_len, verify_core_wots_bus_len,
+    verify_core_wots_pk_m_bus_len, VerifyCoreBuses, SPX_D,
     SIG_AFTER_FORS, SIG_R_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
 };
 pub use verify_public_io::{

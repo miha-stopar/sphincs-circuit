@@ -16,8 +16,8 @@ use crate::merkle::{
 };
 use crate::thash::{alloc_input_bits, enforce_digest_equals, thash_digest_bits, ADDR_BYTES, SPX_N};
 use crate::thash_link::{
-    thash_f_core_link, thash_f_out, ThashFBusValue, ThashHBusValue, THASH_F_SLOT_LEN,
-    THASH_H_SLOT_LEN,
+    thash_f_core_link, thash_f_out, thash_m_bus_len, thash_m_core_link, ThashFBusValue, ThashHBusValue,
+    ThashMBusValue, FORS_PK_INBLOCKS, THASH_F_SLOT_LEN, THASH_H_SLOT_LEN,
 };
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
@@ -127,19 +127,18 @@ where
 pub const FORS_F_CALLS: usize = SPX_FORS_TREES;
 pub const FORS_H_CALLS: usize = SPX_FORS_TREES * SPX_FORS_HEIGHT as usize;
 
-/// Native bus values for `fors_pk_from_sig`: the 14 leaf `F` calls and the
-/// `14 × 12` Merkle-node `H` calls, in the exact order
-/// [`fors_pk_from_sig_bits_linked`] consumes them. The final horizontal
-/// `thash(pk, roots, 14)` is **not** offloaded (multi-block). Pure (no PQClean).
+/// Native bus values for `fors_pk_from_sig`: the 14 leaf `F` calls, the
+/// `14 × 12` Merkle-node `H` calls, and the horizontal FORS-pk `thash`-M.
 pub fn fors_pk_bus_values(
     pub_seed: &[u8; SPX_N],
     addr_base: &[u8; ADDR_BYTES],
     sig: &[u8; SPX_FORS_BYTES],
     mhash: &[u8; SPX_FORS_MSG_BYTES],
-) -> (Vec<ThashFBusValue>, Vec<ThashHBusValue>) {
+) -> (Vec<ThashFBusValue>, Vec<ThashHBusValue>, ThashMBusValue) {
     let indices = message_to_indices(mhash);
     let mut f_values = Vec::with_capacity(FORS_F_CALLS);
     let mut h_values = Vec::with_capacity(FORS_H_CALLS);
+    let mut tree_roots = Vec::with_capacity(SPX_FORS_TREES * SPX_N);
     let mut sig_off = 0usize;
 
     for (i, &leaf_idx) in indices.iter().enumerate() {
@@ -159,7 +158,7 @@ pub fn fors_pk_bus_values(
 
         let auth = &sig[sig_off..sig_off + SPX_FORS_HEIGHT as usize * SPX_N];
         sig_off += SPX_FORS_HEIGHT as usize * SPX_N;
-        let (vals, _root) = compute_root_h_bus_values(
+        let (vals, root) = compute_root_h_bus_values(
             pub_seed,
             &tree_addr,
             &leaf,
@@ -169,16 +168,18 @@ pub fn fors_pk_bus_values(
             SPX_FORS_HEIGHT,
         );
         h_values.extend(vals);
+        tree_roots.extend_from_slice(&root);
     }
-    (f_values, h_values)
+
+    let pk_addr = addr_with_type(addr_base, SPX_ADDR_TYPE_FORSPK);
+    let pk_m = crate::thash_link::thash_m_bus_value(pub_seed, &pk_addr, &tree_roots);
+    (f_values, h_values, pk_m)
 }
 
-/// Trace-linked [`fors_pk_from_sig_bits`]: each tree's leaf `F` and Merkle-node `H`
-/// `thash`es are offloaded to the `f_bus` / `h_bus` (folded steps). The final
-/// horizontal `thash(pk, roots, 14)` stays in-core (multi-block, not yet offloaded).
+/// Trace-linked [`fors_pk_from_sig_bits`]: leaf `F`, node `H`, and horizontal pk
+/// `thash`-M are offloaded to `f_bus` / `h_bus` / `pk_m_bus`.
 ///
-/// `f_bus` length = `FORS_F_CALLS · THASH_F_SLOT_LEN`; `h_bus` length =
-/// `FORS_H_CALLS · THASH_H_SLOT_LEN`.
+/// `pk_m_bus` length = [`thash_m_bus_len`](crate::thash_link::thash_m_bus_len)(`FORS_PK_INBLOCKS`).
 pub fn fors_pk_from_sig_bits_linked<Scalar, CS>(
     mut cs: CS,
     pub_seed: &[u8; SPX_N],
@@ -187,6 +188,7 @@ pub fn fors_pk_from_sig_bits_linked<Scalar, CS>(
     mhash: &[u8; SPX_FORS_MSG_BYTES],
     f_bus: &[AllocatedNum<Scalar>],
     h_bus: &[AllocatedNum<Scalar>],
+    pk_m_bus: &[AllocatedNum<Scalar>],
 ) -> Result<Vec<Boolean>, SynthesisError>
 where
     Scalar: ff::PrimeField,
@@ -194,6 +196,7 @@ where
 {
     assert_eq!(f_bus.len(), FORS_F_CALLS * THASH_F_SLOT_LEN);
     assert_eq!(h_bus.len(), FORS_H_CALLS * THASH_H_SLOT_LEN);
+    assert_eq!(pk_m_bus.len(), thash_m_bus_len(FORS_PK_INBLOCKS));
 
     let indices = message_to_indices(mhash);
     let mut tree_roots_bits = Vec::with_capacity(SPX_FORS_TREES * SPX_N * 8);
@@ -233,13 +236,14 @@ where
         tree_roots_bits.extend(root_bits);
     }
 
-    // thash(pk, roots, SPX_FORS_TREES) — multi-block, kept in-core for now.
+    // thash(pk, roots, SPX_FORS_TREES) — multi-block, offloaded via pk_m_bus.
     let pk_addr = addr_with_type(addr_base, SPX_ADDR_TYPE_FORSPK);
-    thash_digest_bits(
+    thash_m_core_link(
         cs.namespace(|| "fors_pk"),
-        pub_seed,
         &pk_addr,
         &tree_roots_bits,
+        FORS_PK_INBLOCKS,
+        pk_m_bus,
     )
 }
 
@@ -318,7 +322,8 @@ mod tests {
         use crate::satcheck::SatCheckCS;
         use crate::thash::witness_bytes_from_bits;
         use crate::thash_link::{
-            alloc_thash_f_bus, alloc_thash_h_bus, seeded_state, thash_f_step, thash_h_step,
+            alloc_thash_f_bus, alloc_thash_h_bus, alloc_thash_m_bus, seeded_state, thash_f_step,
+            thash_h_step, thash_m_synthesize_steps,
         };
 
         let pub_seed = [0x31u8; 16];
@@ -334,7 +339,7 @@ mod tests {
             witness_bytes_from_bits::<16>(&pk)
         };
 
-        let (f_values, h_values) = fors_pk_bus_values(&pub_seed, &addr, &sig, &mhash);
+        let (f_values, h_values, pk_m) = fors_pk_bus_values(&pub_seed, &addr, &sig, &mhash);
         assert_eq!(f_values.len(), FORS_F_CALLS);
         assert_eq!(h_values.len(), FORS_H_CALLS);
         let seeded = seeded_state(&pub_seed);
@@ -342,6 +347,7 @@ mod tests {
         let mut cs = SatCheckCS::<Fr>::new();
         let f_bus = alloc_thash_f_bus(cs.namespace(|| "fbus"), &f_values).unwrap();
         let h_bus = alloc_thash_h_bus(cs.namespace(|| "hbus"), &h_values).unwrap();
+        let pk_m_bus = alloc_thash_m_bus(cs.namespace(|| "pk_m_bus"), &pk_m).unwrap();
         let pk = fors_pk_from_sig_bits_linked(
             cs.namespace(|| "fors"),
             &pub_seed,
@@ -350,6 +356,7 @@ mod tests {
             &mhash,
             &f_bus,
             &h_bus,
+            &pk_m_bus,
         )
         .unwrap();
         for (k, v) in f_values.iter().enumerate() {
@@ -369,6 +376,8 @@ mod tests {
             )
             .unwrap();
         }
+        thash_m_synthesize_steps(cs.namespace(|| "pk_m_steps"), &pub_seed, &pk_m, &pk_m_bus)
+            .unwrap();
         assert!(
             cs.is_satisfied(),
             "offloaded FORS unsatisfied at {:?}",

@@ -34,10 +34,13 @@ use crate::hash_msg::{
 };
 use crate::hypertree::{
     hypertree_layer_from_root_bits, hypertree_layer_from_root_bits_linked,
-    hypertree_layer_from_root_bits_offloaded, SPX_TREE_AUTH_BYTES, SPX_TREE_HEIGHT,
+    hypertree_layer_from_root_bits_offloaded, wots_pk_leaf_m_bus_value, SPX_TREE_AUTH_BYTES,
+    SPX_TREE_HEIGHT,
 };
 use crate::thash::{enforce_bits_equal_bytes, witness_bytes_from_bits, ADDR_BYTES, SPX_N};
-use crate::thash_link::{THASH_F_SLOT_LEN, THASH_H_SLOT_LEN};
+use crate::thash_link::{
+    thash_m_bus_len, FORS_PK_INBLOCKS, THASH_F_SLOT_LEN, THASH_H_SLOT_LEN, WOTS_PK_INBLOCKS,
+};
 use crate::verify_public_io::InputizedVerifyPublic;
 use crate::wots::{wots_step_count, SPX_WOTS_BYTES};
 use bellpepper::gadgets::boolean::Boolean;
@@ -592,24 +595,30 @@ pub const fn verify_core_fors_h_bus_len() -> usize {
     FORS_H_CALLS * THASH_H_SLOT_LEN
 }
 
-/// The four shared-witness buses consumed by [`synthesize_verify_core_offloaded`].
-/// Each is a contiguous block of field elements; see the `*_bus_len` helpers for
-/// sizing (the `wots` bus is sized by [`verify_core_wots_bus_len`]).
+/// Number of offloaded FORS-pk `thash`-M bus slots.
+pub const fn verify_core_fors_pk_m_bus_len() -> usize {
+    thash_m_bus_len(FORS_PK_INBLOCKS)
+}
+
+/// Number of offloaded WOTS-pk leaf `thash`-M bus slots across all 7 layers.
+pub const fn verify_core_wots_pk_m_bus_len() -> usize {
+    SPX_D * thash_m_bus_len(WOTS_PK_INBLOCKS)
+}
+
+/// The shared-witness buses consumed by [`synthesize_verify_core_offloaded`].
 pub struct VerifyCoreBuses<'a, Scalar: ff::PrimeField> {
-    /// FORS leaf `F` calls (`verify_core_fors_f_bus_len`).
     pub fors_f: &'a [AllocatedNum<Scalar>],
-    /// FORS node `H` calls (`verify_core_fors_h_bus_len`).
     pub fors_h: &'a [AllocatedNum<Scalar>],
-    /// WOTS chain `F` calls across all layers (`verify_core_wots_bus_len`).
+    /// FORS horizontal pk `thash`-M (`verify_core_fors_pk_m_bus_len`).
+    pub fors_pk_m: &'a [AllocatedNum<Scalar>],
     pub wots: &'a [AllocatedNum<Scalar>],
-    /// Hypertree Merkle `H` calls across all layers (`verify_core_hypertree_h_bus_len`).
+    /// WOTS-pk leaf `thash`-M per hypertree layer (`verify_core_wots_pk_m_bus_len`).
+    pub wots_pk_m: &'a [AllocatedNum<Scalar>],
     pub merkle_h: &'a [AllocatedNum<Scalar>],
 }
 
-/// Trace-linked verify-core *tail* with **all single-block `thash` families
-/// offloaded**: FORS leaf `F` + node `H`, every WOTS chain `F`, and every Merkle
-/// `H`. Only the two multi-block families (the WOTS-pk leaf `thash` and the FORS-pk
-/// horizontal `thash`) remain in-core.
+/// Trace-linked verify-core *tail* with **all `thash` families offloaded** except
+/// `hash_message` (FORS F+H+M, WOTS F+M, Merkle H).
 fn synthesize_verify_core_tail_offloaded<Scalar, CS>(
     mut cs: CS,
     pk: &[u8; SPHINCS_PK_BYTES],
@@ -623,7 +632,9 @@ where
 {
     assert_eq!(buses.fors_f.len(), verify_core_fors_f_bus_len());
     assert_eq!(buses.fors_h.len(), verify_core_fors_h_bus_len());
+    assert_eq!(buses.fors_pk_m.len(), verify_core_fors_pk_m_bus_len());
     assert_eq!(buses.merkle_h.len(), verify_core_hypertree_h_bus_len());
+    assert_eq!(buses.wots_pk_m.len(), verify_core_wots_pk_m_bus_len());
 
     let pub_seed = {
         let mut s = [0u8; SPX_N];
@@ -658,11 +669,14 @@ where
         &mhash,
         buses.fors_f,
         buses.fors_h,
+        buses.fors_pk_m,
     )?;
     let mut root_bits = fors_pk_bits;
     let mut sig_off = SIG_AFTER_FORS;
     let mut wots_cursor = 0usize;
     let merkle_per_layer = SPX_TREE_HEIGHT as usize * THASH_H_SLOT_LEN;
+    let wots_pk_m_per_layer = thash_m_bus_len(WOTS_PK_INBLOCKS);
+    let mut wots_pk_m_cursor = 0usize;
 
     for layer in 0..SPX_D {
         let mut wots_addr = [0u8; ADDR_BYTES];
@@ -696,6 +710,9 @@ where
 
         let layer_merkle_bus =
             &buses.merkle_h[layer * merkle_per_layer..(layer + 1) * merkle_per_layer];
+        let layer_wots_pk_m_bus = &buses.wots_pk_m
+            [wots_pk_m_cursor..wots_pk_m_cursor + wots_pk_m_per_layer];
+        wots_pk_m_cursor += wots_pk_m_per_layer;
 
         root_bits = hypertree_layer_from_root_bits_offloaded(
             cs.namespace(|| format!("layer_{layer}")),
@@ -708,6 +725,7 @@ where
             idx_leaf,
             auth,
             layer_wots_bus,
+            layer_wots_pk_m_bus,
             layer_merkle_bus,
         )?;
 
@@ -719,13 +737,10 @@ where
     Ok(())
 }
 
-/// Fully offloaded trace-linked [`synthesize_verify_core`]: every single-block
-/// `thash` (FORS leaf `F`, FORS node `H`, WOTS chain `F`, Merkle `H`) is a
-/// shared-bus link to a folded `C_step`. Only `hash_message` and the two
-/// multi-block `thash`es (WOTS-pk leaf, FORS-pk root) remain in-core.
+/// Fully offloaded trace-linked [`synthesize_verify_core`]: every `thash` except
+/// `hash_message` is a shared-bus link to a folded `C_step`.
 ///
-/// Size the buses with [`verify_core_fors_f_bus_len`], [`verify_core_fors_h_bus_len`],
-/// [`verify_core_wots_bus_len`], and [`verify_core_hypertree_h_bus_len`].
+/// Size the buses with the `verify_core_*_bus_len` helpers.
 pub fn synthesize_verify_core_offloaded<Scalar, CS>(
     mut cs: CS,
     pk: &[u8; SPHINCS_PK_BYTES],
@@ -974,7 +989,7 @@ mod tests {
     /// leaf F + node H, WOTS chains F, Merkle H) to folded `C_step`s over four
     /// shared buses. The joint system (linked core + all folded steps) must be
     /// satisfiable on a real PQClean signature — the capstone cross-family wiring
-    /// check. Only the two multi-block thashes stay in-core.
+    /// check. Only `hash_message` stays in-core.
     ///
     /// ```bash
     /// cargo test -p sphincs-circuit valid_signature_satisfies_core_offloaded --release -- --ignored --nocapture --test-threads=1
@@ -985,8 +1000,8 @@ mod tests {
         use crate::fors::fors_pk_bus_values;
         use crate::merkle::compute_root_h_bus_values;
         use crate::thash_link::{
-            alloc_thash_f_bus, alloc_thash_h_bus, seeded_state, thash_f_step, thash_h_step,
-            ThashFBusValue, ThashHBusValue,
+            alloc_thash_f_bus, alloc_thash_h_bus, alloc_thash_m_bus, seeded_state, thash_f_step,
+            thash_h_step, thash_m_synthesize_steps, ThashFBusValue, ThashHBusValue, ThashMBusValue,
         };
         use crate::wots::wots_pk_bus_values;
         use sphincs_ref::{
@@ -1008,7 +1023,6 @@ mod tests {
         padded[..msg.len()].copy_from_slice(msg);
         let pub_seed: [u8; SPX_N] = pk[..SPX_N].try_into().unwrap();
 
-        // ---- native walk (via oracles) to build the per-family bus values ----
         let hm = hash_message_oracle(&r, &pk, msg, msg.len());
         let mut tree = hm.tree;
         let mut idx_leaf = hm.leaf_idx;
@@ -1020,13 +1034,13 @@ mod tests {
         let mut fors_sig = [0u8; SPX_FORS_BYTES];
         fors_sig.copy_from_slice(&sig[SIG_R_BYTES..SIG_AFTER_FORS]);
 
-        // FORS bus values (leaf F + node H).
-        let (fors_f_vals, fors_h_vals) =
+        let (fors_f_vals, fors_h_vals, fors_pk_m) =
             fors_pk_bus_values(&pub_seed, &fors_addr, &fors_sig, &hm.mhash);
         let mut root = fors_pk_from_sig_oracle(&pub_seed, &fors_addr, &fors_sig, &hm.mhash);
 
         let mut sig_off = SIG_AFTER_FORS;
         let mut wots_vals: Vec<ThashFBusValue> = Vec::new();
+        let mut wots_pk_m_vals: Vec<ThashMBusValue> = Vec::new();
         let mut merkle_vals: Vec<ThashHBusValue> = Vec::new();
         for layer in 0..SPX_D {
             let mut wots_addr = [0u8; ADDR_BYTES];
@@ -1054,15 +1068,14 @@ mod tests {
 
             wots_vals.extend(wots_pk_bus_values(&pub_seed, &wots_addr, &sig_wots, &root));
 
-            // Merkle H bus values for this layer (leaf = thash(wots_pk)).
             let wots_pk = wots_pk_from_sig_oracle(&pub_seed, &wots_addr, &sig_wots, &root);
+            wots_pk_m_vals.push(wots_pk_leaf_m_bus_value(&pub_seed, &wots_pk_addr, &wots_pk));
             let leaf = thash_oracle(&pub_seed, &wots_pk_addr, &wots_pk);
             let (h_vals, layer_root) = compute_root_h_bus_values(
                 &pub_seed, &tree_addr, &leaf, idx_leaf, 0, auth, SPX_TREE_HEIGHT,
             );
             merkle_vals.extend(h_vals);
 
-            // Cross-check against the PQClean oracle and advance.
             let oracle_root = compute_root_oracle(
                 &pub_seed, &tree_addr, &leaf, idx_leaf, 0, auth, SPX_TREE_HEIGHT,
             );
@@ -1072,24 +1085,31 @@ mod tests {
             tree >>= SPX_TREE_HEIGHT;
         }
 
-        // ---- joint circuit: offloaded core + all folded steps over four buses ----
         let seeded = seeded_state(&pub_seed);
         let mut cs = SatCheckCS::<Fr>::new();
         let fors_f_bus = alloc_thash_f_bus(cs.namespace(|| "fors_f_bus"), &fors_f_vals).unwrap();
         let fors_h_bus = alloc_thash_h_bus(cs.namespace(|| "fors_h_bus"), &fors_h_vals).unwrap();
+        let fors_pk_m_bus = alloc_thash_m_bus(cs.namespace(|| "fors_pk_m_bus"), &fors_pk_m).unwrap();
         let wots_bus = alloc_thash_f_bus(cs.namespace(|| "wots_bus"), &wots_vals).unwrap();
+        let mut wots_pk_m_bus_nums = Vec::new();
+        for (i, v) in wots_pk_m_vals.iter().enumerate() {
+            wots_pk_m_bus_nums.extend(
+                alloc_thash_m_bus(cs.namespace(|| format!("wots_pk_m_{i}")), v).unwrap(),
+            );
+        }
         let merkle_bus = alloc_thash_h_bus(cs.namespace(|| "merkle_bus"), &merkle_vals).unwrap();
 
         let buses = VerifyCoreBuses {
             fors_f: &fors_f_bus,
             fors_h: &fors_h_bus,
+            fors_pk_m: &fors_pk_m_bus,
             wots: &wots_bus,
+            wots_pk_m: &wots_pk_m_bus_nums,
             merkle_h: &merkle_bus,
         };
         synthesize_verify_core_offloaded(&mut cs, &pk, &padded, msg.len(), &sig, &hm_mgf, &buses)
             .expect("synth");
 
-        // Folded F steps: FORS leaves then WOTS chains.
         for (k, v) in fors_f_vals.iter().enumerate() {
             let slot = &fors_f_bus[k * THASH_F_SLOT_LEN..(k + 1) * THASH_F_SLOT_LEN];
             thash_f_step(cs.namespace(|| format!("ff_{k}")), &seeded, &v.addr, &v.input, slot)
@@ -1100,7 +1120,6 @@ mod tests {
             thash_f_step(cs.namespace(|| format!("wf_{k}")), &seeded, &v.addr, &v.input, slot)
                 .unwrap();
         }
-        // Folded H steps: FORS nodes then Merkle nodes.
         for (k, v) in fors_h_vals.iter().enumerate() {
             let slot = &fors_h_bus[k * THASH_H_SLOT_LEN..(k + 1) * THASH_H_SLOT_LEN];
             thash_h_step(cs.namespace(|| format!("fh_{k}")), &seeded, &v.addr, &v.in0, &v.in1, slot)
@@ -1109,6 +1128,14 @@ mod tests {
         for (k, v) in merkle_vals.iter().enumerate() {
             let slot = &merkle_bus[k * THASH_H_SLOT_LEN..(k + 1) * THASH_H_SLOT_LEN];
             thash_h_step(cs.namespace(|| format!("mh_{k}")), &seeded, &v.addr, &v.in0, &v.in1, slot)
+                .unwrap();
+        }
+        thash_m_synthesize_steps(cs.namespace(|| "fors_pk_m"), &pub_seed, &fors_pk_m, &fors_pk_m_bus)
+            .unwrap();
+        let m_per_layer = verify_core_wots_pk_m_bus_len() / SPX_D;
+        for (layer, v) in wots_pk_m_vals.iter().enumerate() {
+            let bus = &wots_pk_m_bus_nums[layer * m_per_layer..(layer + 1) * m_per_layer];
+            thash_m_synthesize_steps(cs.namespace(|| format!("wots_pk_m_{layer}")), &pub_seed, v, bus)
                 .unwrap();
         }
 

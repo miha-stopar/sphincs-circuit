@@ -13,6 +13,7 @@
 
 use crate::merkle::{compute_root_bits, compute_root_bits_linked};
 use crate::thash::{enforce_digest_equals, thash_digest_bits, ADDR_BYTES, SPX_N};
+use crate::thash_link::{thash_m_bus_value, thash_m_bus_len, thash_m_core_link, ThashMBusValue, WOTS_PK_INBLOCKS};
 use crate::wots::{wots_pk_from_sig_root_bits, wots_pk_from_sig_root_bits_linked, SPX_WOTS_BYTES};
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
@@ -132,11 +133,20 @@ where
     )
 }
 
-/// Fully offloaded hypertree layer: **both** the WOTS chains (`wots_bus`, `F`) and
-/// the Merkle `compute_root` levels (`merkle_h_bus`, `H`) are shared-bus links to
-/// folded steps. Only the multi-block WOTS-pk leaf `thash` stays in-core.
+/// Native `thash`-M bus values for the WOTS-pk leaf hash of one hypertree layer.
+pub fn wots_pk_leaf_m_bus_value(
+    pub_seed: &[u8; SPX_N],
+    wots_pk_addr: &[u8; ADDR_BYTES],
+    wots_pk: &[u8; SPX_WOTS_BYTES],
+) -> ThashMBusValue {
+    thash_m_bus_value(pub_seed, wots_pk_addr, wots_pk)
+}
+
+/// Fully offloaded hypertree layer: WOTS chains (`wots_bus`), WOTS-pk leaf
+/// `thash`-M (`wots_pk_m_bus`), and Merkle `H` levels (`merkle_h_bus`) are shared-bus
+/// links to folded steps.
 ///
-/// `merkle_h_bus` length = `SPX_TREE_HEIGHT · THASH_H_SLOT_LEN`.
+/// `wots_pk_m_bus` length = [`thash_m_bus_len`](crate::thash_link::thash_m_bus_len)(`WOTS_PK_INBLOCKS`).
 #[allow(clippy::too_many_arguments)]
 pub fn hypertree_layer_from_root_bits_offloaded<Scalar, CS>(
     mut cs: CS,
@@ -149,12 +159,15 @@ pub fn hypertree_layer_from_root_bits_offloaded<Scalar, CS>(
     idx_leaf: u32,
     auth_path: &[u8],
     wots_bus: &[AllocatedNum<Scalar>],
+    wots_pk_m_bus: &[AllocatedNum<Scalar>],
     merkle_h_bus: &[AllocatedNum<Scalar>],
 ) -> Result<Vec<Boolean>, SynthesisError>
 where
     Scalar: ff::PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
+    assert_eq!(wots_pk_m_bus.len(), thash_m_bus_len(WOTS_PK_INBLOCKS));
+
     let wots_pk_bits = wots_pk_from_sig_root_bits_linked(
         cs.namespace(|| "wots"),
         wots_addr,
@@ -164,11 +177,12 @@ where
     )?;
 
     let leaf_addr = addr_with_type(wots_pk_addr, SPX_ADDR_TYPE_WOTSPK);
-    let leaf_bits = thash_digest_bits(
+    let leaf_bits = thash_m_core_link(
         cs.namespace(|| "leaf"),
-        pub_seed,
         &leaf_addr,
         &wots_pk_bits,
+        WOTS_PK_INBLOCKS,
+        wots_pk_m_bus,
     )?;
 
     compute_root_bits_linked(

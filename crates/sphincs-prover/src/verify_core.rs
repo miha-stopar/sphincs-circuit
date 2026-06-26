@@ -578,6 +578,8 @@ impl SpartanCircuit<E> for FoldVerifyCoreCircuit {
                     signature,
                     &self.hm_mgf,
                     &buses,
+                    &offload.wots_layer_steps,
+                    &offload.wots_layer_lengths,
                 )?;
             }
         }

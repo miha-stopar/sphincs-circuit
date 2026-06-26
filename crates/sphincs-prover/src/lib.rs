@@ -33,6 +33,7 @@
 mod bound;
 mod core;
 mod fold;
+mod offload_shared;
 mod packed;
 mod thash_fold;
 mod trace;
@@ -43,6 +44,10 @@ mod verify_witness;
 pub use bound::{
     bound_steps_from_inputs, FoldCoreBoundCircuit, FoldPackedCoreBoundCircuit, FoldStepBoundCircuit,
 };
+pub use offload_shared::{
+    next_power_of_two_steps, pad_thash_f_values_to_power_of_two, FoldStepBoundOffloadCircuit,
+    OffloadSharedContext, ThashFBusRegion,
+};
 pub use core::{FoldCoreChainCircuit, FoldCoreCircuit};
 pub use verify_core::{FoldVerifyCoreCircuit, VerifyCorePhase, message_bytes, padded_message, sig_r};
 pub use circuit_spec::VERIFY_PUBLIC_NUM_SCALARS;
@@ -50,7 +55,7 @@ pub use sphincs_circuit::pack_verify_public;
 #[cfg(feature = "pqclean")]
 pub use verify_witness::{
     fold_verify_core_from_pqclean, fold_verify_core_offloaded_from_pqclean,
-    intermediate_roots_oracle, offload_witness_from_pqclean,
+    intermediate_roots_oracle, offload_shared_context_from_pqclean, offload_witness_from_pqclean,
 };
 pub use fold::{
     fold_and_prove, fold_and_prove_general, fold_and_prove_with, fold_prove_verify_timed, setup,
@@ -59,9 +64,9 @@ pub use fold::{
 };
 pub use packed::FoldPackedChainCircuit;
 pub use thash_fold::{
-    thash_f_chain_fold, thash_h_compute_root_fold, thash_m_single_call_fold, FoldThashFCoreCircuit,
-    FoldThashFStepCircuit, FoldThashHCoreCircuit, FoldThashHStepCircuit, FoldThashMCoreCircuit,
-    FoldThashMStepCircuit,
+    thash_f_chain_fold, thash_f_offload_steps_fold, thash_h_compute_root_fold, thash_m_single_call_fold,
+    FoldThashFCoreCircuit, FoldThashFStepCircuit, FoldThashHCoreCircuit, FoldThashHStepCircuit,
+    FoldThashMCoreCircuit, FoldThashMStepCircuit,
 };
 pub use trace::{
     chain_boundary_links, fold_steps_from_rows, fold_steps_prefix, hash_message_chain_prefix,

@@ -25,15 +25,15 @@ use bellpepper_core::{
 use ff::Field;
 use spartan2::traits::{circuit::SpartanCircuit, Engine};
 use sphincs_circuit::{
-    alloc_thash_f_bus, alloc_thash_h_bus, alloc_thash_m_bus, compute_root_bits_linked,
-    compute_root_h_bus_values, enforce_cond_link_eq_u32, enforce_num_eq_be_bits, gen_chain_linked,
+    alloc_thash_f_bus, alloc_thash_h_bus, alloc_thash_m_bus, alloc_verify_core_offload_shared,
+    compute_root_bits_linked, compute_root_h_bus_values, enforce_cond_link_eq_u32, enforce_num_eq_be_bits, gen_chain_linked,
     one_hot_select, seeded_state, sha256_compress::{
         sha256_state_words_to_bits_be, state_bytes_to_words, synthesize_compression_for_fold_h_words,
     },
     thash::{alloc_input_bits, enforce_bits_equal_bytes, ADDR_BYTES, SPX_N},
     thash_f_chain_bus_values, thash_f_step_values, thash_h_step_values, thash_m_bus_value,
     thash_m_core_link, thash_m_link_count, thash_m_padded_blocks,
-    thash_m_variable_compression_count, ThashFBusValue, ThashHBusValue, ThashMBusValue,
+    thash_m_variable_compression_count, verify_core_fors_f_bus_len, ThashFBusValue, ThashHBusValue, ThashMBusValue,
     DIGEST_WORDS, THASH_F_SLOT_LEN, THASH_H_SLOT_LEN,
 };
 
@@ -120,6 +120,57 @@ fn bind_muxed_column<CS: ConstraintSystem<Scalar>>(
     enforce_num_eq_be_bits(cs.namespace(|| format!("bind_{field}")), &selected, bits)
 }
 
+/// Like [`bind_muxed_column`], but skipped when `active == 0` (padding instances past bus size).
+fn bind_muxed_column_gated<CS: ConstraintSystem<Scalar>>(
+    cs: &mut CS,
+    active: &AllocatedNum<Scalar>,
+    pos: &[AllocatedNum<Scalar>],
+    shared: &[AllocatedNum<Scalar>],
+    slot_len: usize,
+    field: usize,
+    bits: &[bellpepper_core::boolean::Boolean],
+    bus_slots: usize,
+) -> Result<(), SynthesisError> {
+    let num_steps = pos.len();
+    let last_slot = bus_slots.saturating_sub(1);
+    let vals: Vec<AllocatedNum<Scalar>> = (0..num_steps)
+        .map(|k| {
+            let slot = k.min(last_slot);
+            shared[slot * slot_len + field].clone()
+        })
+        .collect();
+    let selected = one_hot_select(cs.namespace(|| format!("mux_{field}")), pos, &vals)?;
+    enforce_when_num_eq_be_bits(cs.namespace(|| format!("bind_{field}")), active, &selected, bits)
+}
+
+/// `active = 1` iff `step_index < bus_slots` (sum of `pos[0..bus_slots]`).
+fn alloc_bus_active_gate<CS: ConstraintSystem<Scalar>>(
+    cs: &mut CS,
+    pos: &[AllocatedNum<Scalar>],
+    bus_slots: usize,
+) -> Result<AllocatedNum<Scalar>, SynthesisError> {
+    let active = AllocatedNum::alloc(cs.namespace(|| "bus_active"), || {
+        let on = pos
+            .iter()
+            .take(bus_slots)
+            .any(|p| p.get_value() == Some(Scalar::ONE));
+        Ok(if on { Scalar::ONE } else { Scalar::ZERO })
+    })?;
+    cs.enforce(
+        || "bus_active_sum",
+        |lc| {
+            let mut lc = lc;
+            for p in pos.iter().take(bus_slots) {
+                lc = lc + p.get_variable();
+            }
+            lc
+        },
+        |lc| lc + CS::one(),
+        |lc| lc + active.get_variable(),
+    );
+    Ok(active)
+}
+
 /// One folded `thash`-F step: proves a single offloaded compression and binds its
 /// `addr/in/out` to bus slot `step_index` via a one-hot selector.
 #[derive(Clone, Debug)]
@@ -130,6 +181,10 @@ pub struct FoldThashFStepCircuit {
     pub values: Vec<ThashFBusValue>,
     /// Which step / bus slot this instance proves.
     pub step_index: usize,
+    /// When set, `shared()` matches [`crate::offload_shared::OffloadSharedContext`] / offloaded core.
+    pub offload_ctx: Option<crate::offload_shared::OffloadSharedContext>,
+    /// F-bus region inside unified shared witness (ignored when `offload_ctx` is `None`).
+    pub f_region: crate::offload_shared::ThashFBusRegion,
     _p: PhantomData<Scalar>,
 }
 
@@ -140,8 +195,20 @@ impl FoldThashFStepCircuit {
             seeded,
             values,
             step_index,
+            offload_ctx: None,
+            f_region: crate::offload_shared::ThashFBusRegion::ForsF,
             _p: PhantomData,
         }
+    }
+
+    pub fn with_offload_ctx(
+        mut self,
+        ctx: crate::offload_shared::OffloadSharedContext,
+        region: crate::offload_shared::ThashFBusRegion,
+    ) -> Self {
+        self.offload_ctx = Some(ctx);
+        self.f_region = region;
+        self
     }
 
     fn num_steps(&self) -> usize {
@@ -158,7 +225,15 @@ impl SpartanCircuit<E> for FoldThashFStepCircuit {
         &self,
         cs: &mut CS,
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
-        alloc_thash_f_bus(cs.namespace(|| "thash_f_bus"), &self.values)
+        if let Some(ctx) = &self.offload_ctx {
+            alloc_verify_core_offload_shared(
+                cs.namespace(|| "offload_shared"),
+                &ctx.link_digests,
+                &ctx.offload,
+            )
+        } else {
+            alloc_thash_f_bus(cs.namespace(|| "thash_f_bus"), &self.values)
+        }
     }
 
     fn precommitted<CS: ConstraintSystem<Scalar>>(
@@ -168,7 +243,6 @@ impl SpartanCircuit<E> for FoldThashFStepCircuit {
     ) -> Result<Vec<AllocatedNum<Scalar>>, SynthesisError> {
         let pos = alloc_step_selector(cs, self.step_index, self.num_steps())?;
 
-        // Compute this instance's compression bits (uses its own addr/in).
         let own = &self.values[self.step_index];
         let (addr_bits, in_bits, out_bits) = thash_f_step_values(
             cs.namespace(|| "compute"),
@@ -177,9 +251,34 @@ impl SpartanCircuit<E> for FoldThashFStepCircuit {
             &own.input,
         )?;
 
-        // Bind each field to the selector-muxed bus column (uniform shape).
+        let f_bus = if let Some(ctx) = &self.offload_ctx {
+            crate::offload_shared::thash_f_region_columns(shared, ctx, self.f_region)
+        } else {
+            shared
+        };
+
+        let bus_slots = if self.offload_ctx.is_some() {
+            match self.f_region {
+                crate::offload_shared::ThashFBusRegion::ForsF => {
+                    verify_core_fors_f_bus_len() / THASH_F_SLOT_LEN
+                }
+                crate::offload_shared::ThashFBusRegion::Wots => {
+                    self.offload_ctx.as_ref().unwrap().offload.wots.len()
+                }
+            }
+        } else {
+            self.values.len()
+        };
+        let active = alloc_bus_active_gate(cs, &pos, bus_slots)?;
+
         for (field, bits) in [(0usize, &addr_bits), (1, &in_bits), (2, &out_bits)] {
-            bind_muxed_column(cs, &pos, shared, THASH_F_SLOT_LEN, field, bits)?;
+            if self.offload_ctx.is_some() {
+                bind_muxed_column_gated(
+                    cs, &active, &pos, f_bus, THASH_F_SLOT_LEN, field, bits, bus_slots,
+                )?;
+            } else {
+                bind_muxed_column(cs, &pos, f_bus, THASH_F_SLOT_LEN, field, bits)?;
+            }
         }
         Ok(vec![])
     }
@@ -481,6 +580,23 @@ pub fn thash_h_compute_root_fold(
         _p: PhantomData,
     };
     (step_circuits, core)
+}
+
+/// Build `thash`-F fold steps that share the offloaded verify-core witness layout.
+pub fn thash_f_offload_steps_fold(
+    seeded: [u8; 32],
+    values: Vec<ThashFBusValue>,
+    ctx: crate::offload_shared::OffloadSharedContext,
+    region: crate::offload_shared::ThashFBusRegion,
+    num_steps: usize,
+) -> Vec<FoldThashFStepCircuit> {
+    assert!(num_steps.is_power_of_two());
+    let values = crate::offload_shared::pad_thash_f_values_to_power_of_two(values, num_steps);
+    (0..num_steps)
+        .map(|i| {
+            FoldThashFStepCircuit::new(seeded, values.clone(), i).with_offload_ctx(ctx.clone(), region)
+        })
+        .collect()
 }
 
 // ===========================================================================

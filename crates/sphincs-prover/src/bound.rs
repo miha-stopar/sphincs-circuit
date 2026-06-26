@@ -114,7 +114,8 @@ impl FoldStepBoundCircuit {
     /// shared link this step reads as `h_in` (link `step_index - 1`) and writes as `h_out`
     /// (link `step_index`). Boundary steps skip the absent side via the `pos[0]` / `pos[last]`
     /// gates.
-    fn synthesize_precommitted_linked<CS: ConstraintSystem<Scalar>>(
+    /// Uniform step↔shared wiring (see module docs). Exposed for [`super::offload_shared::FoldStepBoundOffloadCircuit`].
+    pub(crate) fn synthesize_precommitted_linked<CS: ConstraintSystem<Scalar>>(
         &self,
         cs: &mut CS,
         shared: &[AllocatedNum<Scalar>],

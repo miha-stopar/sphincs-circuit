@@ -206,25 +206,30 @@ pub fn wots_pk_bus_values(
     values
 }
 
-/// Trace-linked [`wots_pk_from_sig_bits`]: every chain `thash`-F is a bus link to a
-/// folded step instead of an in-core SHA-256.
-///
-/// `bus` holds `THASH_F_SLOT_LEN` field elements per executed step, in chain-then
-/// step order (length = `THASH_F_SLOT_LEN * wots_step_count(msg)`). No `pub_seed`
-/// is needed: `C_core` performs no compression.
-pub fn wots_pk_from_sig_bits_linked<Scalar, CS>(
+/// Total offloaded `thash`-F steps for explicit chain lengths.
+pub fn wots_step_count_from_lengths(lengths: &[u32; SPX_WOTS_LEN]) -> usize {
+    lengths
+        .iter()
+        .map(|&len| (SPX_WOTS_W - 1 - len) as usize)
+        .sum()
+}
+
+/// Trace-linked WOTS pk with explicit chain lengths (topology fixed at synthesis).
+pub fn wots_pk_from_sig_bits_linked_lengths<Scalar, CS>(
     mut cs: CS,
     addr_base: &[u8; ADDR_BYTES],
     sig: &[u8; SPX_WOTS_BYTES],
-    msg: &[u8; SPX_N],
+    lengths: &[u32; SPX_WOTS_LEN],
     bus: &[AllocatedNum<Scalar>],
 ) -> Result<Vec<Boolean>, SynthesisError>
 where
     Scalar: ff::PrimeField,
     CS: ConstraintSystem<Scalar>,
 {
-    assert_eq!(bus.len(), wots_step_count(msg) * THASH_F_SLOT_LEN);
-    let lengths = chain_lengths(msg);
+    assert_eq!(
+        bus.len(),
+        wots_step_count_from_lengths(lengths) * THASH_F_SLOT_LEN
+    );
     let mut pk_bits = Vec::with_capacity(SPX_WOTS_BYTES * 8);
     let mut cursor = 0usize;
 
@@ -249,6 +254,27 @@ where
         pk_bits.extend(top);
     }
     Ok(pk_bits)
+}
+
+/// Trace-linked [`wots_pk_from_sig_bits`]: every chain `thash`-F is a bus link to a
+/// folded step instead of an in-core SHA-256.
+///
+/// `bus` holds `THASH_F_SLOT_LEN` field elements per executed step, in chain-then
+/// step order (length = `THASH_F_SLOT_LEN * wots_step_count(msg)`). No `pub_seed`
+/// is needed: `C_core` performs no compression.
+pub fn wots_pk_from_sig_bits_linked<Scalar, CS>(
+    cs: CS,
+    addr_base: &[u8; ADDR_BYTES],
+    sig: &[u8; SPX_WOTS_BYTES],
+    msg: &[u8; SPX_N],
+    bus: &[AllocatedNum<Scalar>],
+) -> Result<Vec<Boolean>, SynthesisError>
+where
+    Scalar: ff::PrimeField,
+    CS: ConstraintSystem<Scalar>,
+{
+    let lengths = chain_lengths(msg);
+    wots_pk_from_sig_bits_linked_lengths(cs, addr_base, sig, &lengths, bus)
 }
 
 /// Trace-linked [`wots_pk_from_sig_root_bits`]: WOTS topology follows the witness

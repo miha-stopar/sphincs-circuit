@@ -34,7 +34,7 @@ use crate::hash_msg::{
 };
 use crate::hypertree::{
     hypertree_layer_from_root_bits, hypertree_layer_from_root_bits_linked,
-    hypertree_layer_from_root_bits_offloaded, wots_pk_leaf_m_bus_value, SPX_TREE_AUTH_BYTES,
+    hypertree_layer_from_root_bits_offloaded, SPX_TREE_AUTH_BYTES,
     SPX_TREE_HEIGHT,
 };
 use crate::thash::{enforce_bits_equal_bytes, witness_bytes_from_bits, ADDR_BYTES, SPX_N};
@@ -44,7 +44,7 @@ use crate::thash_link::{
     THASH_F_SLOT_LEN, THASH_H_SLOT_LEN, WOTS_PK_INBLOCKS,
 };
 use crate::verify_public_io::InputizedVerifyPublic;
-use crate::wots::{wots_step_count, SPX_WOTS_BYTES};
+use crate::wots::{wots_step_count, SPX_WOTS_BYTES, SPX_WOTS_LEN};
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use circuit_spec::{MESSAGE_MAX_BYTES, SPHINCS_PK_BYTES, SPHINCS_SIG_BYTES};
@@ -627,6 +627,8 @@ fn synthesize_verify_core_tail_offloaded<Scalar, CS>(
     signature: &[u8; SPHINCS_SIG_BYTES],
     hm: &HashMessageOutput,
     buses: &VerifyCoreBuses<Scalar>,
+    wots_layer_steps: &[usize; SPX_D],
+    wots_layer_lengths: &[[u32; SPX_WOTS_LEN]; SPX_D],
 ) -> Result<(), SynthesisError>
 where
     Scalar: ff::PrimeField,
@@ -637,6 +639,10 @@ where
     assert_eq!(buses.fors_pk_m.len(), verify_core_fors_pk_m_bus_len());
     assert_eq!(buses.merkle_h.len(), verify_core_hypertree_h_bus_len());
     assert_eq!(buses.wots_pk_m.len(), verify_core_wots_pk_m_bus_len());
+    assert_eq!(
+        wots_layer_steps.iter().sum::<usize>() * THASH_F_SLOT_LEN,
+        buses.wots.len()
+    );
 
     let pub_seed = {
         let mut s = [0u8; SPX_N];
@@ -705,8 +711,9 @@ where
         let auth = &signature[sig_off..sig_off + SPX_TREE_AUTH_BYTES];
         sig_off += SPX_TREE_AUTH_BYTES;
 
-        let layer_msg = witness_bytes_from_bits::<SPX_N>(&root_bits);
-        let layer_slots = wots_step_count(&layer_msg) * THASH_F_SLOT_LEN;
+        let _layer_msg = witness_bytes_from_bits::<SPX_N>(&root_bits);
+        let layer_steps = wots_layer_steps[layer];
+        let layer_slots = layer_steps * THASH_F_SLOT_LEN;
         let layer_wots_bus = &buses.wots[wots_cursor..wots_cursor + layer_slots];
         wots_cursor += layer_slots;
 
@@ -726,6 +733,7 @@ where
             &root_bits,
             idx_leaf,
             auth,
+            &wots_layer_lengths[layer],
             layer_wots_bus,
             layer_wots_pk_m_bus,
             layer_merkle_bus,
@@ -751,6 +759,8 @@ pub fn synthesize_verify_core_offloaded<Scalar, CS>(
     signature: &[u8; SPHINCS_SIG_BYTES],
     hm_mgf: &[u8; SPX_DGST_BYTES],
     buses: &VerifyCoreBuses<Scalar>,
+    wots_layer_steps: &[usize; SPX_D],
+    wots_layer_lengths: &[[u32; SPX_WOTS_LEN]; SPX_D],
 ) -> Result<(), SynthesisError>
 where
     Scalar: ff::PrimeField,
@@ -782,6 +792,8 @@ where
         signature,
         &hm,
         buses,
+        wots_layer_steps,
+        wots_layer_lengths,
     )
 }
 
@@ -792,6 +804,11 @@ pub struct VerifyCoreOffloadWitness {
     pub fors_h: Vec<ThashHBusValue>,
     pub fors_pk_m: ThashMBusValue,
     pub wots: Vec<ThashFBusValue>,
+    /// Per-hypertree-layer WOTS `thash`-F step counts (`wots_step_count` of the layer root).
+    /// Used to slice `wots` during synthesis without reading unassigned `root_bits`.
+    pub wots_layer_steps: [usize; SPX_D],
+    /// Per-layer WOTS chain lengths (topology fixed at synthesis for offloaded core).
+    pub wots_layer_lengths: [[u32; SPX_WOTS_LEN]; SPX_D],
     pub wots_pk_m: Vec<ThashMBusValue>,
     pub merkle_h: Vec<ThashHBusValue>,
 }
@@ -1110,7 +1127,8 @@ mod tests {
             alloc_thash_f_bus, alloc_thash_h_bus, alloc_thash_m_bus, seeded_state, thash_f_step,
             thash_h_step, thash_m_synthesize_steps, ThashFBusValue, ThashHBusValue, ThashMBusValue,
         };
-        use crate::wots::wots_pk_bus_values;
+        use crate::hypertree::wots_pk_leaf_m_bus_value;
+        use crate::wots::{wots_pk_bus_values, wots_step_count, chain_lengths, SPX_WOTS_LEN};
         use sphincs_ref::{
             compute_root_oracle, fors_pk_from_sig_oracle, hash_message_oracle, thash_oracle,
             wots_pk_from_sig_oracle,
@@ -1147,6 +1165,8 @@ mod tests {
 
         let mut sig_off = SIG_AFTER_FORS;
         let mut wots_vals: Vec<ThashFBusValue> = Vec::new();
+        let mut wots_layer_steps = [0usize; SPX_D];
+        let mut wots_layer_lengths = [[0u32; SPX_WOTS_LEN]; SPX_D];
         let mut wots_pk_m_vals: Vec<ThashMBusValue> = Vec::new();
         let mut merkle_vals: Vec<ThashHBusValue> = Vec::new();
         for layer in 0..SPX_D {
@@ -1173,6 +1193,8 @@ mod tests {
             let auth = &sig[sig_off..sig_off + SPX_TREE_AUTH_BYTES];
             sig_off += SPX_TREE_AUTH_BYTES;
 
+            wots_layer_steps[layer] = wots_step_count(&root);
+            wots_layer_lengths[layer] = chain_lengths(&root);
             wots_vals.extend(wots_pk_bus_values(&pub_seed, &wots_addr, &sig_wots, &root));
 
             let wots_pk = wots_pk_from_sig_oracle(&pub_seed, &wots_addr, &sig_wots, &root);
@@ -1214,7 +1236,17 @@ mod tests {
             wots_pk_m: &wots_pk_m_bus_nums,
             merkle_h: &merkle_bus,
         };
-        synthesize_verify_core_offloaded(&mut cs, &pk, &padded, msg.len(), &sig, &hm_mgf, &buses)
+        synthesize_verify_core_offloaded(
+            &mut cs,
+            &pk,
+            &padded,
+            msg.len(),
+            &sig,
+            &hm_mgf,
+            &buses,
+            &wots_layer_steps,
+            &wots_layer_lengths,
+        )
             .expect("synth");
 
         for (k, v) in fors_f_vals.iter().enumerate() {

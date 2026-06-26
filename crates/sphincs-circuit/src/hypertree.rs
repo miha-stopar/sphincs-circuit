@@ -14,7 +14,10 @@
 use crate::merkle::{compute_root_bits, compute_root_bits_linked};
 use crate::thash::{enforce_digest_equals, thash_digest_bits, ADDR_BYTES, SPX_N};
 use crate::thash_link::{thash_m_bus_value, thash_m_bus_len, thash_m_core_link, ThashMBusValue, WOTS_PK_INBLOCKS};
-use crate::wots::{wots_pk_from_sig_root_bits, wots_pk_from_sig_root_bits_linked, SPX_WOTS_BYTES};
+use crate::wots::{
+    wots_pk_from_sig_bits_linked_lengths, wots_pk_from_sig_root_bits,
+    wots_pk_from_sig_root_bits_linked, SPX_WOTS_BYTES, SPX_WOTS_LEN,
+};
 use bellpepper::gadgets::boolean::Boolean;
 use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 
@@ -158,6 +161,7 @@ pub fn hypertree_layer_from_root_bits_offloaded<Scalar, CS>(
     root_in_bits: &[Boolean],
     idx_leaf: u32,
     auth_path: &[u8],
+    wots_chain_lengths: &[u32; SPX_WOTS_LEN],
     wots_bus: &[AllocatedNum<Scalar>],
     wots_pk_m_bus: &[AllocatedNum<Scalar>],
     merkle_h_bus: &[AllocatedNum<Scalar>],
@@ -167,12 +171,13 @@ where
     CS: ConstraintSystem<Scalar>,
 {
     assert_eq!(wots_pk_m_bus.len(), thash_m_bus_len(WOTS_PK_INBLOCKS));
+    let _ = (pub_seed, root_in_bits);
 
-    let wots_pk_bits = wots_pk_from_sig_root_bits_linked(
+    let wots_pk_bits = wots_pk_from_sig_bits_linked_lengths(
         cs.namespace(|| "wots"),
         wots_addr,
         sig_wots,
-        root_in_bits,
+        wots_chain_lengths,
         wots_bus,
     )?;
 

@@ -79,6 +79,11 @@ name = "fold_verify_core_full"
 path = "tests/fold_verify_core_full.rs"
 required-features = ["pqclean"]
 
+[[test]]
+name = "fold_verify_core_offloaded"
+path = "tests/fold_verify_core_offloaded.rs"
+required-features = ["pqclean"]
+
 [[bin]]
 name = "fold-bench"
 path = "src/bin/fold_bench.rs"

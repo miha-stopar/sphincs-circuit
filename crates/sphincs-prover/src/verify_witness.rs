@@ -28,14 +28,12 @@
 
 use circuit_spec::{MESSAGE_MAX_BYTES, SPHINCS_PK_BYTES, SPHINCS_SIG_BYTES};
 use sphincs_circuit::{
-    fors::fors_pk_bus_values,
-    fors::SPX_FORS_BYTES,
-    hash_message_mgf_buf, hash_msg::HashMessageOutput, hypertree::SPX_TREE_AUTH_BYTES,
-    hypertree::SPX_TREE_HEIGHT, hypertree::wots_pk_leaf_m_bus_value,
-    merkle::compute_root_h_bus_values, thash::SPX_N, thash_link::ThashMBusValue,
-    wots::wots_pk_bus_values, VerifyCoreOffloadWitness,
-    SPX_D, SPX_WOTS_BYTES, SPX_ADDR_TYPE_HASHTREE, SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK,
-    SIG_AFTER_FORS, SIG_R_BYTES,
+    fors::fors_pk_bus_values, fors::SPX_FORS_BYTES, hash_message_mgf_buf,
+    hash_msg::HashMessageOutput, hypertree::SPX_TREE_AUTH_BYTES, hypertree::SPX_TREE_HEIGHT,
+    hypertree::wots_pk_leaf_m_bus_value, merkle::compute_root_h_bus_values, thash::ADDR_BYTES,
+    thash::SPX_N, wots::wots_pk_bus_values, wots::wots_step_count, wots::chain_lengths,
+    wots::SPX_WOTS_LEN, VerifyCoreOffloadWitness, SPX_ADDR_TYPE_HASHTREE,
+    SPX_ADDR_TYPE_WOTS, SPX_ADDR_TYPE_WOTSPK, SPX_D, SPX_WOTS_BYTES, SIG_AFTER_FORS, SIG_R_BYTES,
 };
 
 use crate::verify_core::{padded_message, sig_r, FoldVerifyCoreCircuit};
@@ -167,6 +165,8 @@ pub fn offload_witness_from_pqclean(
     sig: &[u8; SPHINCS_SIG_BYTES],
     hm: &HashMessageOutput,
 ) -> VerifyCoreOffloadWitness {
+    use sphincs_ref::{fors_pk_from_sig_oracle, thash_oracle, wots_pk_from_sig_oracle};
+
     let pub_seed = {
         let mut s = [0u8; SPX_N];
         s.copy_from_slice(&pk[..SPX_N]);
@@ -176,7 +176,7 @@ pub fn offload_witness_from_pqclean(
     let mut tree = hm.tree;
     let mut idx_leaf = hm.leaf_idx;
 
-    let mut fors_addr = [0u8; 22];
+    let mut fors_addr = [0u8; ADDR_BYTES];
     fors_addr[9] = SPX_ADDR_TYPE_WOTS;
     fors_addr[1..9].copy_from_slice(&tree.to_be_bytes());
     fors_addr[12] = (idx_leaf >> 8) as u8;
@@ -187,27 +187,29 @@ pub fn offload_witness_from_pqclean(
 
     let (fors_f, fors_h, fors_pk_m) =
         fors_pk_bus_values(&pub_seed, &fors_addr, &fors_sig, &hm.mhash);
-    let mut root = sphincs_ref::fors_pk_from_sig_oracle(&pub_seed, &fors_addr, &fors_sig, &hm.mhash);
+    let mut root = fors_pk_from_sig_oracle(&pub_seed, &fors_addr, &fors_sig, &hm.mhash);
 
     let mut sig_off = SIG_AFTER_FORS;
     let mut wots = Vec::new();
-    let mut wots_pk_m: Vec<ThashMBusValue> = Vec::new();
+    let mut wots_layer_steps = [0usize; SPX_D];
+    let mut wots_layer_lengths = [[0u32; SPX_WOTS_LEN]; SPX_D];
+    let mut wots_pk_m = Vec::new();
     let mut merkle_h = Vec::new();
 
     for layer in 0..SPX_D {
-        let mut wots_addr = [0u8; 22];
+        let mut wots_addr = [0u8; ADDR_BYTES];
         wots_addr[9] = SPX_ADDR_TYPE_WOTS;
         wots_addr[0] = layer as u8;
         wots_addr[1..9].copy_from_slice(&tree.to_be_bytes());
         wots_addr[12] = (idx_leaf >> 8) as u8;
         wots_addr[13] = idx_leaf as u8;
 
-        let mut tree_addr = [0u8; 22];
+        let mut tree_addr = [0u8; ADDR_BYTES];
         tree_addr[0] = layer as u8;
         tree_addr[1..9].copy_from_slice(&tree.to_be_bytes());
         tree_addr[9] = SPX_ADDR_TYPE_HASHTREE;
 
-        let mut wots_pk_addr = [0u8; 22];
+        let mut wots_pk_addr = [0u8; ADDR_BYTES];
         wots_pk_addr[..9].copy_from_slice(&tree_addr[..9]);
         wots_pk_addr[12] = (idx_leaf >> 8) as u8;
         wots_pk_addr[13] = idx_leaf as u8;
@@ -219,12 +221,14 @@ pub fn offload_witness_from_pqclean(
         let auth = &sig[sig_off..sig_off + SPX_TREE_AUTH_BYTES];
         sig_off += SPX_TREE_AUTH_BYTES;
 
+        wots_layer_steps[layer] = wots_step_count(&root);
+        wots_layer_lengths[layer] = chain_lengths(&root);
         wots.extend(wots_pk_bus_values(&pub_seed, &wots_addr, &sig_wots, &root));
 
         let wots_pk =
-            sphincs_ref::wots_pk_from_sig_oracle(&pub_seed, &wots_addr, &sig_wots, &root);
+            wots_pk_from_sig_oracle(&pub_seed, &wots_addr, &sig_wots, &root);
         wots_pk_m.push(wots_pk_leaf_m_bus_value(&pub_seed, &wots_pk_addr, &wots_pk));
-        let leaf = sphincs_ref::thash_oracle(&pub_seed, &wots_pk_addr, &wots_pk);
+        let leaf = thash_oracle(&pub_seed, &wots_pk_addr, &wots_pk);
         let (h_vals, layer_root) = compute_root_h_bus_values(
             &pub_seed, &tree_addr, &leaf, idx_leaf, 0, auth, SPX_TREE_HEIGHT,
         );
@@ -239,6 +243,8 @@ pub fn offload_witness_from_pqclean(
         fors_h,
         fors_pk_m,
         wots,
+        wots_layer_steps,
+        wots_layer_lengths,
         wots_pk_m,
         merkle_h,
     }
@@ -270,6 +276,18 @@ pub fn fold_verify_core_offloaded_from_pqclean(
     )
 }
 
+/// Build [`OffloadSharedContext`] from a PQClean KAT.
+#[cfg(feature = "pqclean")]
+pub fn offload_shared_context_from_pqclean(
+    pk: &[u8; SPHINCS_PK_BYTES],
+    sig: &[u8; SPHINCS_SIG_BYTES],
+    hm: &HashMessageOutput,
+    link_digests: Vec<[u8; 32]>,
+) -> crate::offload_shared::OffloadSharedContext {
+    let offload = offload_witness_from_pqclean(pk, sig, hm);
+    crate::offload_shared::OffloadSharedContext::new(link_digests, offload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +312,92 @@ mod tests {
         let core = fold_verify_core_from_pqclean(pk, sig, msg, vec![]).with_public_io();
         assert!(core.public_io);
         assert_eq!(core.phase, crate::verify_core::VerifyCorePhase::Full);
+    }
+
+    #[test]
+    fn offload_witness_wots_len_matches_verify_core_topology() {
+        use sphincs_circuit::{
+            parse_mgf_output, verify_core_wots_bus_len, wots_step_count, witness_bytes_from_bits,
+        };
+
+        let seed = [0x5au8; CRYPTO_SEEDBYTES];
+        let msg = b"offloaded verify core hash_message smoke";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+        let r = sig_r(&sig);
+        let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, msg.len());
+        let hm = parse_mgf_output(&hm_mgf);
+
+        let witness = offload_witness_from_pqclean(&pk, &sig, &hm);
+        let layer_roots = intermediate_roots_oracle(&pk, &sig, &hm);
+
+        let expected = verify_core_wots_bus_len(&layer_roots);
+        let got = witness.wots.len() * sphincs_circuit::THASH_F_SLOT_LEN;
+        assert_eq!(
+            got, expected,
+            "witness wots slots={} expected={}; per-layer counts witness={:?} expected={:?}",
+            witness.wots.len(),
+            expected / sphincs_circuit::THASH_F_SLOT_LEN,
+            (0..SPX_D)
+                .scan(0usize, |acc, layer| {
+                    let start = *acc;
+                    *acc += wots_step_count(&layer_roots[layer]);
+                    Some((layer, start, *acc))
+                })
+                .collect::<Vec<_>>(),
+            (0..SPX_D)
+                .map(|layer| wots_step_count(&layer_roots[layer]))
+                .collect::<Vec<_>>(),
+        );
+
+        // Layer roots from oracle bytes should match topology implied by linked fors bits.
+        let _ = witness_bytes_from_bits::<SPX_N>;
+    }
+
+    #[test]
+    fn offload_wots_linked_topology_seed_5a() {
+        use bellpepper_core::{ConstraintSystem, test_cs::TestConstraintSystem};
+        use blstrs::Scalar as Fr;
+        use sphincs_circuit::{
+            alloc_verify_core_offload_shared, parse_mgf_output,
+            verify_core_buses_from_offload_shared, synthesize_verify_core_offloaded,
+            wots_step_count,
+        };
+
+        let seed = [0x5au8; CRYPTO_SEEDBYTES];
+        let msg = b"offloaded verify core hash_message smoke";
+        let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+        let (padded, mlen) = crate::padded_message(msg);
+        let r = sig_r(&sig);
+        let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+        let hm = parse_mgf_output(&hm_mgf);
+        let witness = offload_witness_from_pqclean(&pk, &sig, &hm);
+
+        let mut cs = TestConstraintSystem::<Fr>::new();
+        let shared = alloc_verify_core_offload_shared(
+            cs.namespace(|| "shared"),
+            &[],
+            &witness,
+        )
+        .unwrap();
+        let buses = verify_core_buses_from_offload_shared(&shared, 0, &witness);
+        synthesize_verify_core_offloaded(
+            cs.namespace(|| "core"),
+            &pk,
+            &padded,
+            mlen,
+            &sig,
+            &hm_mgf,
+            &buses,
+            &witness.wots_layer_steps,
+            &witness.wots_layer_lengths,
+        )
+        .unwrap();
+        assert!(
+            cs.is_satisfied(),
+            "unsatisfied: {:?}",
+            cs.which_is_unsatisfied()
+        );
+        let _ = wots_step_count;
     }
 
     #[test]

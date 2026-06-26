@@ -9,7 +9,8 @@
 use circuit_spec::Sha256Compression;
 use sphincs_circuit::{
     hash_message_mgf_buf, parse_mgf_output, seeded_state, thash::SPX_N, FORS_F_CALLS,
-    FORS_H_CALLS, FORS_PK_INBLOCKS, thash_m_variable_compression_count,
+    FORS_H_CALLS, FORS_PK_INBLOCKS, hypertree::SPX_TREE_HEIGHT, thash_m_variable_compression_count,
+    SPX_D,
 };
 use sphincs_prover::{
     fold_and_prove_general, longest_chain_bound, next_power_of_two_steps,
@@ -212,6 +213,53 @@ fn fold_verify_core_offloaded_fors_pk_m_smoke() {
         FORS_PK_INBLOCKS,
         OffloadSharedContext::new(vec![], ctx.offload.clone()),
         ThashMBusRegion::ForsPkM,
+        n,
+    );
+
+    let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
+    let proof = fold_and_prove_general(&pk_fold, &steps, &core);
+    verify_proof(&vk, &proof, steps.len());
+}
+
+/// Hypertree Merkle `thash`-H steps + offloaded core (unified shared; HM links empty).
+#[test]
+fn fold_verify_core_offloaded_merkle_h_smoke() {
+    let seed = [0x9eu8; CRYPTO_SEEDBYTES];
+    let msg = b"offloaded verify core merkle h smoke";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+
+    let (message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+    let hm = parse_mgf_output(&hm_mgf);
+
+    let ctx = offload_shared_context_from_pqclean(&pk, &sig, &hm, vec![]);
+    let core = FoldVerifyCoreCircuit::offloaded(
+        pk,
+        message,
+        mlen,
+        sig,
+        r,
+        hm_mgf,
+        vec![],
+        ctx.offload.clone(),
+    );
+
+    let pub_seed = {
+        let mut s = [0u8; SPX_N];
+        s.copy_from_slice(&pk[..SPX_N]);
+        s
+    };
+    let seeded = seeded_state(&pub_seed);
+    let merkle_h = ctx.offload.merkle_h.clone();
+    let expected = SPX_D as usize * SPX_TREE_HEIGHT as usize;
+    assert_eq!(merkle_h.len(), expected);
+    let n = next_power_of_two_steps(expected);
+    let steps = thash_h_offload_steps_fold(
+        seeded,
+        merkle_h,
+        OffloadSharedContext::new(vec![], ctx.offload.clone()),
+        ThashHBusRegion::MerkleH,
         n,
     );
 

@@ -10,7 +10,7 @@ bellpepper = "0.4.1"
 bellpepper-core = "0.4.0"
 ff = "0.13"
 circuit-spec = { path = "../circuit-spec" }
-sha2 = "0.10"
+sha2 = { version = "0.10", features = ["compress"] }
 
 [dev-dependencies]
 blstrs = "0.7"

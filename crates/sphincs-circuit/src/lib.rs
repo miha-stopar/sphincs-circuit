@@ -18,6 +18,7 @@ pub mod satcheck;
 pub mod sha256_compress;
 pub mod step;
 pub mod thash;
+pub mod thash_link;
 pub mod verify;
 pub mod verify_public_io;
 pub mod witness;
@@ -66,6 +67,11 @@ pub use step::{StepCircuit, StepInput};
 pub use thash::{
     enforce_bits_equal_bytes, synthesize_thash, synthesize_thash_with_stats, thash_digest_bits,
     thash_preimage, witness_bytes_from_bits, ThashStats,
+};
+pub use thash_link::{
+    alloc_thash_f_bus, alloc_thash_f_slot, gen_chain_linked, seeded_state, thash_f_block,
+    thash_f_chain_bus_values, thash_f_core_link, thash_f_full_digest, thash_f_out, thash_f_step,
+    ThashFBusValue, F_PREIMAGE_BYTES, THASH_F_SLOT_LEN,
 };
 pub use verify::{
     enforce_message_padding, enforce_message_padding_witness, synthesize_verify_core,

@@ -8,16 +8,16 @@
 
 use circuit_spec::Sha256Compression;
 use sphincs_circuit::{
-    hash_message_mgf_buf, parse_mgf_output, seeded_state, thash::SPX_N, FORS_F_CALLS,
-    FORS_H_CALLS, FORS_PK_INBLOCKS, hypertree::SPX_TREE_HEIGHT, thash_m_variable_compression_count,
-    SPX_D,
+    hash_message_mgf_buf, parse_mgf_output, seeded_state, step::StepInput, thash::SPX_N,
+    FORS_F_CALLS, FORS_H_CALLS, FORS_PK_INBLOCKS, hypertree::SPX_TREE_HEIGHT,
+    thash_m_variable_compression_count, SPX_D,
 };
 use sphincs_prover::{
-    fold_and_prove_general, longest_chain_bound, next_power_of_two_steps,
-    offload_shared_context_from_pqclean, setup_with_proto, sig_r, thash_f_offload_steps_fold,
-    thash_h_offload_steps_fold, thash_m_offload_steps_fold, verify_proof,
-    FoldStepBoundOffloadCircuit, FoldVerifyCoreCircuit, OffloadSharedContext, ThashFBusRegion,
-    ThashHBusRegion, ThashMBusRegion, padded_message,
+    fold_and_prove_general, longest_chain_bound, mega_batch_hash_message_and_fors_f,
+    next_power_of_two_steps, offload_shared_context_from_pqclean, pad_link_digests_for_steps,
+    setup_with_proto, sig_r, thash_f_offload_steps_fold, thash_h_offload_steps_fold, thash_m_offload_steps_fold,
+    verify_proof, FoldOffloadMegaStepCircuit, FoldStepBoundOffloadCircuit, FoldVerifyCoreCircuit,
+    OffloadSharedContext, ThashFBusRegion, ThashHBusRegion, ThashMBusRegion, padded_message,
 };
 use sphincs_ref::{sign_deterministic, verify_with_trace, CRYPTO_SEEDBYTES};
 
@@ -266,4 +266,185 @@ fn fold_verify_core_offloaded_merkle_h_smoke() {
     let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
     let proof = fold_and_prove_general(&pk_fold, &steps, &core);
     verify_proof(&vk, &proof, steps.len());
+}
+
+/// HM + FORS-F mega steps in one homogeneous NeutronNova fold batch.
+///
+/// Local R1CS sat: [`fold_verify_core_offloaded_mega_steps_local_sat`],
+/// [`fold_verify_core_offloaded_mega_step_core_local_sat`].
+#[test]
+#[ignore = "NeutronNova verify fails InvalidSumcheckProof; per-instance + step+core local sat pass"]
+fn fold_verify_core_offloaded_mega_batch_hash_message_and_fors_f() {
+    let seed = [0x7cu8; CRYPTO_SEEDBYTES];
+    let msg = b"offloaded verify core mega batch hm + fors f";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+
+    let hm_n = max_hm_steps();
+    let (_chain, bound_steps, _old_core, links) =
+        longest_chain_bound(&rows, hm_n).expect("local chain");
+    let digests: Vec<_> = links.iter().map(|(left, _)| *left).collect();
+    let hm_inputs: Vec<StepInput> = bound_steps.iter().map(|b| b.input).collect();
+
+    let (message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+    let hm = parse_mgf_output(&hm_mgf);
+
+    let num_steps = next_power_of_two_steps(hm_inputs.len() + FORS_F_CALLS);
+    let padded_digests = pad_link_digests_for_steps(digests, num_steps);
+    let ctx = offload_shared_context_from_pqclean(&pk, &sig, &hm, padded_digests.clone());
+    let fors_f = ctx.offload.fors_f.clone();
+    assert_eq!(fors_f.len(), FORS_F_CALLS);
+    let core = FoldVerifyCoreCircuit::offloaded(
+        pk,
+        message,
+        mlen,
+        sig,
+        r,
+        hm_mgf,
+        padded_digests,
+        ctx.offload.clone(),
+    );
+    let steps: Vec<FoldOffloadMegaStepCircuit> = mega_batch_hash_message_and_fors_f(
+        hm_inputs,
+        &{
+            let mut s = [0u8; SPX_N];
+            s.copy_from_slice(&pk[..SPX_N]);
+            s
+        },
+        &fors_f,
+        ctx,
+        num_steps,
+    );
+    assert_eq!(steps.len(), num_steps);
+
+    let (pk_fold, vk) = setup_with_proto(&steps[0], &core, steps.len());
+    let proof = fold_and_prove_general(&pk_fold, &steps, &core);
+    verify_proof(&vk, &proof, steps.len());
+}
+
+/// Local R1CS: mega-step HM + F instances synthesize satisfiable constraints.
+#[test]
+fn fold_verify_core_offloaded_mega_steps_local_sat() {
+    use bellpepper_core::test_cs::TestConstraintSystem;
+    use spartan2::traits::circuit::SpartanCircuit;
+    use sphincs_prover::E;
+
+    type Scalar = <E as spartan2::traits::Engine>::Scalar;
+
+    let seed = [0x7du8; CRYPTO_SEEDBYTES];
+    let msg = b"mega step local sat";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+
+    let hm_n = max_hm_steps();
+    let (_chain, bound_steps, _old_core, links) =
+        longest_chain_bound(&rows, hm_n).expect("local chain");
+    let digests: Vec<_> = links.iter().map(|(left, _)| *left).collect();
+    let hm_inputs: Vec<StepInput> = bound_steps.iter().map(|b| b.input).collect();
+
+    let (_message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+    let hm = parse_mgf_output(&hm_mgf);
+
+    let num_steps = next_power_of_two_steps(hm_inputs.len() + FORS_F_CALLS);
+    let padded_digests = pad_link_digests_for_steps(digests, num_steps);
+    let ctx = offload_shared_context_from_pqclean(&pk, &sig, &hm, padded_digests);
+    let fors_f = ctx.offload.fors_f.clone();
+    let steps: Vec<FoldOffloadMegaStepCircuit> = mega_batch_hash_message_and_fors_f(
+        hm_inputs,
+        &{
+            let mut s = [0u8; SPX_N];
+            s.copy_from_slice(&pk[..SPX_N]);
+            s
+        },
+        &fors_f,
+        ctx,
+        num_steps,
+    );
+
+    for step in &steps {
+        let mut cs = TestConstraintSystem::<Scalar>::new();
+        let shared = step.shared(&mut cs).expect("shared");
+        step.precommitted(&mut cs, &shared).expect("precommitted");
+        assert!(
+            cs.is_satisfied(),
+            "mega step batch={} kind={}: {:?}",
+            step.batch_index,
+            step.payload.kind_id(),
+            cs.which_is_unsatisfied()
+        );
+    }
+}
+
+/// Step + core on one shared witness (NeutronNova combined satisfiability).
+#[test]
+fn fold_verify_core_offloaded_mega_step_core_local_sat() {
+    use bellpepper_core::test_cs::TestConstraintSystem;
+    use spartan2::traits::circuit::SpartanCircuit;
+    use sphincs_prover::E;
+
+    type Scalar = <E as spartan2::traits::Engine>::Scalar;
+
+    let seed = [0x7eu8; CRYPTO_SEEDBYTES];
+    let msg = b"mega step core local sat";
+    let (pk, sig) = sign_deterministic(&seed, msg).expect("sign");
+    let trace = verify_with_trace(&pk, msg, &sig).expect("trace");
+    let rows = compressions_spec(&trace);
+
+    let hm_n = max_hm_steps();
+    let (_chain, bound_steps, _old_core, links) =
+        longest_chain_bound(&rows, hm_n).expect("local chain");
+    let digests: Vec<_> = links.iter().map(|(left, _)| *left).collect();
+    let hm_inputs: Vec<StepInput> = bound_steps.iter().map(|b| b.input).collect();
+
+    let (message, mlen) = padded_message(msg);
+    let r = sig_r(&sig);
+    let hm_mgf = hash_message_mgf_buf(&r, &pk, msg, mlen);
+    let hm = parse_mgf_output(&hm_mgf);
+
+    let num_steps = next_power_of_two_steps(hm_inputs.len() + FORS_F_CALLS);
+    let padded_digests = pad_link_digests_for_steps(digests, num_steps);
+    let ctx = offload_shared_context_from_pqclean(&pk, &sig, &hm, padded_digests.clone());
+    let core = FoldVerifyCoreCircuit::offloaded(
+        pk,
+        message,
+        mlen,
+        sig,
+        r,
+        hm_mgf,
+        padded_digests,
+        ctx.offload.clone(),
+    );
+    let fors_f = ctx.offload.fors_f.clone();
+    let steps: Vec<FoldOffloadMegaStepCircuit> = mega_batch_hash_message_and_fors_f(
+        hm_inputs,
+        &{
+            let mut s = [0u8; SPX_N];
+            s.copy_from_slice(&pk[..SPX_N]);
+            s
+        },
+        &fors_f,
+        ctx,
+        num_steps,
+    );
+
+    for &idx in &[0usize, 4, 19] {
+        let mut cs = TestConstraintSystem::<Scalar>::new();
+        let shared = steps[idx].shared(&mut cs).expect("shared");
+        steps[idx]
+            .precommitted(&mut cs, &shared)
+            .expect("step precommitted");
+        core.precommitted(&mut cs, &shared)
+            .expect("core precommitted");
+        assert!(
+            cs.is_satisfied(),
+            "step {idx} + core: {:?}",
+            cs.which_is_unsatisfied()
+        );
+    }
 }

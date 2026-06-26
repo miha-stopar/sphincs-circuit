@@ -734,7 +734,10 @@ fn and_gate<CS: ConstraintSystem<Scalar>>(
 }
 
 /// Uniform folded `thash`-M compression step (identical R1CS across instances).
-fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
+///
+/// `m_kind` is `1` on active `thash`-M mega steps (or always `1` in standalone fold);
+/// link/out-field gates are muxed uniformly from `m_kind`.
+pub(crate) fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
     cs: &mut CS,
     h_in: &[u8; 32],
     block: &[u8; 64],
@@ -743,15 +746,22 @@ fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
     inblocks: usize,
     bus: &[AllocatedNum<Scalar>],
     gated_var_count: Option<usize>,
+    m_kind: &AllocatedNum<Scalar>,
+    kind_inactive: Option<&AllocatedNum<Scalar>>,
+    mega_step_pos: bool,
 ) -> Result<(), SynthesisError> {
     let var_count = thash_m_variable_compression_count(inblocks);
     let num_links = thash_m_link_count(inblocks);
     assert!(num_steps >= var_count);
     assert!(step_index < num_steps);
 
-    let pos = alloc_step_selector(cs, step_index, num_steps)?;
+    let pos = if mega_step_pos {
+        crate::uniform::alloc_step_pos(cs, step_index, num_steps)?
+    } else {
+        alloc_step_selector(cs, step_index, num_steps)?
+    };
 
-    let (first_gate, last_gate) = if let Some(vc) = gated_var_count {
+    let (first_orig, last_orig) = if let Some(vc) = gated_var_count {
         assert_eq!(vc, var_count);
         let active = alloc_bus_active_gate(cs, &pos, vc)?;
         (
@@ -760,6 +770,11 @@ fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
         )
     } else {
         (pos[0].clone(), pos[var_count - 1].clone())
+    };
+    let (first_gate, last_gate) = if let Some(skip) = kind_inactive {
+        (skip.clone(), skip.clone())
+    } else {
+        (first_orig.clone(), last_orig.clone())
     };
 
     let h_in_words: Vec<UInt32> = state_bytes_to_words(h_in)
@@ -807,16 +822,21 @@ fn synthesize_thash_m_step_fold<CS: ConstraintSystem<Scalar>>(
 
     let out_bits: Vec<Boolean> = sha256_state_words_to_bits_be(&out_words[..4]);
     let out_field = &bus[bus.len() - 1];
+    let out_field_gate = and_gate(cs, "out_field_en", m_kind, &last_orig)?;
     enforce_when_num_eq_be_bits(
         cs.namespace(|| "out_field"),
-        &last_gate,
+        &out_field_gate,
         out_field,
         &out_bits,
     )?;
     Ok(())
 }
 
-fn thash_m_step_h_in(seeded: &[u8; 32], value: &ThashMBusValue, step_index: usize) -> [u8; 32] {
+pub(crate) fn thash_m_step_h_in(
+    seeded: &[u8; 32],
+    value: &ThashMBusValue,
+    step_index: usize,
+) -> [u8; 32] {
     if step_index == 0 {
         *seeded
     } else {
@@ -907,6 +927,20 @@ impl SpartanCircuit<E> for FoldThashMStepCircuit {
         };
         let var_count = thash_m_variable_compression_count(self.inblocks);
         let gated = self.offload_ctx.is_some().then_some(var_count);
+        let m_kind = AllocatedNum::alloc(cs.namespace(|| "m_kind_always"), || Ok(Scalar::ONE))?;
+        cs.enforce(
+            || "m_kind_bool",
+            |lc| lc + m_kind.get_variable(),
+            |lc| lc + CS::one() - m_kind.get_variable(),
+            |lc| lc,
+        );
+        let not_m_kind = AllocatedNum::alloc(cs.namespace(|| "not_m_kind_never"), || Ok(Scalar::ZERO))?;
+        cs.enforce(
+            || "not_m_kind_bool",
+            |lc| lc + not_m_kind.get_variable(),
+            |lc| lc + CS::one() - not_m_kind.get_variable(),
+            |lc| lc,
+        );
         synthesize_thash_m_step_fold(
             cs,
             &self.h_in,
@@ -916,6 +950,9 @@ impl SpartanCircuit<E> for FoldThashMStepCircuit {
             self.inblocks,
             m_bus,
             gated,
+            &m_kind,
+            None,
+            false,
         )?;
         Ok(vec![])
     }
@@ -1093,6 +1130,7 @@ mod tests {
 
         let mut cs = TestConstraintSystem::<Fr>::new();
         let bus = alloc_thash_m_bus(cs.namespace(|| "bus"), &value).unwrap();
+        let m_kind = AllocatedNum::alloc(cs.namespace(|| "m_kind"), || Ok(Scalar::ONE)).unwrap();
         for i in 0..var_count {
             let h_in = thash_m_step_h_in(&seeded, &value, i);
             synthesize_thash_m_step_fold(
@@ -1104,6 +1142,9 @@ mod tests {
                 inblocks,
                 &bus,
                 None,
+                &m_kind,
+                None,
+                false,
             )
             .unwrap();
         }

@@ -223,3 +223,16 @@ pub const fn next_power_of_two_steps(n: usize) -> usize {
     }
     p
 }
+
+/// Pad `hash_message` link digests to `num_steps - 1` (duplicate last boundary).
+pub fn pad_link_digests_for_steps(mut digests: Vec<[u8; 32]>, num_steps: usize) -> Vec<[u8; 32]> {
+    let need = num_steps.saturating_sub(1);
+    if digests.is_empty() {
+        digests.resize(need, [0u8; 32]);
+    } else {
+        while digests.len() < need {
+            digests.push(*digests.last().expect("non-empty digests"));
+        }
+    }
+    digests
+}

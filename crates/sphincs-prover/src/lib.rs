@@ -33,9 +33,11 @@
 mod bound;
 mod core;
 mod fold;
+mod mega_step;
 mod offload_shared;
 mod packed;
 mod thash_fold;
+mod uniform;
 mod trace;
 mod verify_core;
 #[cfg(feature = "pqclean")]
@@ -45,7 +47,7 @@ pub use bound::{
     bound_steps_from_inputs, FoldCoreBoundCircuit, FoldPackedCoreBoundCircuit, FoldStepBoundCircuit,
 };
 pub use offload_shared::{
-    next_power_of_two_steps, pad_thash_f_values_to_power_of_two,
+    next_power_of_two_steps, pad_link_digests_for_steps, pad_thash_f_values_to_power_of_two,
     pad_thash_h_values_to_power_of_two, FoldStepBoundOffloadCircuit, OffloadSharedContext,
     ThashFBusRegion, ThashHBusRegion, ThashMBusRegion,
 };
@@ -64,6 +66,11 @@ pub use fold::{
     FoldStepCircuit, FoldVerifierKey, ProveTimings,
 };
 pub use packed::FoldPackedChainCircuit;
+pub use mega_step::{
+    build_offload_mega_steps, mega_batch_hash_message_and_fors_f, mega_step_thash_m,
+    FoldOffloadMegaStepCircuit, MegaStepPayload, MEGA_KIND_COUNT, MEGA_KIND_HASH_MESSAGE,
+    MEGA_KIND_THASH_F, MEGA_KIND_THASH_H, MEGA_KIND_THASH_M,
+};
 pub use thash_fold::{
     thash_f_chain_fold, thash_f_offload_steps_fold, thash_h_compute_root_fold,
     thash_h_offload_steps_fold, thash_m_offload_steps_fold, thash_m_single_call_fold,
